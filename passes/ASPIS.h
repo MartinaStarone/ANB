@@ -240,5 +240,21 @@ public:
 
   static bool isRequired() { return true; }
 };
+class ANBPass : public PassInfoMixin<ANBPass> {
+private:
+    std::map<Value *, StringRef> FuncAnnotations;
+    std::unordered_map<BasicBlock *, uint32_t> compileTimeSig;
 
+    bool isRACFEDInstruction(Instruction *I, GlobalVariable *RuntimeSig) const;
+    bool hasANBInstructions(BasicBlock &BB, GlobalVariable *RuntimeSig) const;
+    void createSignature(Function &F);
+    void checkJumpSig(BasicBlock &BB, GlobalVariable *RuntimeSig,
+                      GlobalVariable *PrevSig);
+    void saveSignature(BasicBlock &BB, GlobalVariable *RuntimeSig,
+                      GlobalVariable *PrevSig);
+
+public:
+    PreservedAnalyses run(Module &Md, ModuleAnalysisManager &AM);
+    static bool isRequired() { return true; }
+};
 #endif

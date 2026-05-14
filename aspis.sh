@@ -23,7 +23,8 @@ llvm_bin=$(dirname "$(which clang)")
 suffix=""
 build_dir="."
 dup=0 # 0 = eddi,   1 = seddi,  2 = fdsc
-cfc=0 # 0 = cfcss,  1 = rasm,   2 = inter-rasm
+cfc=0 # 0 = cfcss,  1 = rasm,   2 = inter-rasm,  3 = racfed, 4 = anb-only
+enable_anb=false
 debug_enabled=false
 verbose=false
 cleanup=true
@@ -137,6 +138,8 @@ parse_commands() {
         --rasm              Enable RASM.
         --inter-rasm        Enable inter-RASM with the default signature -0xDEAD.
         --racfed            Enable RACFED.
+        --anb               Enable ANB (together with RACFED).
+        --anb-only          Enable ANB as a standalone pass (without RACFED).
         --no-cfc            Completely disable control-flow checking.
 
     Hardening options:
@@ -221,6 +224,12 @@ EOF
                         ;;
                     --racfed)
                         cfc=3
+                        ;;
+                    --anb)
+                        enable_anb=true
+                        ;;
+                    --anb-only)
+                        cfc=4
                         ;;
                     --no-cfc)
                         cfc=-1
@@ -386,6 +395,19 @@ run_aspis() {
             ;;
         3)
             exe $OPT -load-pass-plugin=$DIR/build/passes/libRACFED.so --passes="racfed-verify" $build_dir/out.ll -o $build_dir/out.ll $cfc_options
+            if [[ $enable_anb == true ]]; then
+                mkdir -p out_racfed_anb
+                exe $OPT -load-pass-plugin=$DIR/build/passes/Utils/libUtils.so \
+                         -load-pass-plugin=$DIR/build/passes/libANB.so \
+                         --passes="anb-encode" $build_dir/out.ll -o out_racfed_anb/out_anb.ll -S
+                cp out_racfed_anb/out_anb.ll $build_dir/out.ll
+                success_msg "ANB output saved to out_racfed_anb/out_anb.ll"
+            fi
+            ;;
+        4)
+            exe $OPT -load-pass-plugin=$DIR/build/passes/Utils/libUtils.so \
+                     -load-pass-plugin=$DIR/build/passes/libANB.so \
+                     --passes="anb-encode" $build_dir/out.ll -o $build_dir/out.ll -S
             ;;
         *)
             echo -e "\t--no-cfc specified!"
