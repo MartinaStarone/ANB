@@ -65,6 +65,21 @@ Value *createANBSetEq(IRBuilder<> &Bld,
                       Value *b, uint64_t Bb,
                       uint64_t A = ANB_DEFAULT_A);
 
+/**
+ *
+    * @param Bld  IRBuilder positioned at the insertion point.
+     * @param a    Raw i64 operand a.
+     * @param Ba   Compile-time bias for a.
+     * @param b    Raw i64 operand b.
+     * @param Bb   Compile-time bias for b.
+     * @param A    ANB modulus.
+     * @return     IR value holding diff % A  (i64).
+ */
+ANBValue createANBMul(IRBuilder<> &Bld,
+                       Value *a, uint64_t Ba,
+                       Value *b, uint64_t Bb,
+                       uint64_t A = ANB_DEFAULT_A);
+
 } // namespace llvm
 
 // ── Pass declaration ──────────────────────────────────────────────────────────
@@ -102,6 +117,12 @@ private:
                       llvm::GlobalVariable *PrevSig);
 
     void saveSnapshot(llvm::BasicBlock &BB, llvm::GlobalVariable *RuntimeSig, llvm::GlobalVariable *PrevSig);
+
+    llvm::Value *checkSig(llvm::Module &Md, llvm::ANBValue av, llvm::IRBuilder<> &B);
+    void checkOnReturn(llvm::BasicBlock &BB,
+                       llvm::GlobalVariable *RuntimeSig,
+                       llvm::GlobalVariable *PrevSig);
+
 
     /// Saves runtime_sig snapshot into PrevSig before the BB terminator.
     void saveSignature(llvm::BasicBlock &BB,
