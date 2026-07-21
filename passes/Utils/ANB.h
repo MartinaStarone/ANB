@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <map>
 #include <unordered_map>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/ScalarEvolution.h>
 
 namespace llvm {
 
@@ -80,6 +82,14 @@ ANBValue createANBMul(IRBuilder<> &Bld,
                        Value *b, uint64_t Bb,
                        uint64_t A = ANB_DEFAULT_A);
 
+/**
+ * Emits IR that computes the ANB-encoded subtraction of two values.
+ */
+ANBValue createANBSub(IRBuilder<> &Bld,
+                      Value *a, uint64_t Ba,
+                      Value *b, uint64_t Bb,
+                      uint64_t A = ANB_DEFAULT_A);
+
 } // namespace llvm
 
 // ── Pass declaration ──────────────────────────────────────────────────────────
@@ -115,6 +125,10 @@ private:
     void checkJumpSig(llvm::BasicBlock &BB,
                       llvm::GlobalVariable *RuntimeSig,
                       llvm::GlobalVariable *PrevSig);
+
+    void checkLoopCount(llvm::Loop *L, llvm::ScalarEvolution &SE, uint64_t expectedRounds,
+                        llvm::GlobalVariable *RuntimeSig,
+                        llvm::GlobalVariable *PrevSig, llvm::Module &Md);
 
     void saveSnapshot(llvm::BasicBlock &BB, llvm::GlobalVariable *RuntimeSig, llvm::GlobalVariable *PrevSig);
 

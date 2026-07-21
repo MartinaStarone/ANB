@@ -9,6 +9,9 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+
 #include <random>
 #include <string>
 
@@ -61,6 +64,33 @@ ANBValue llvm::createANBadd(IRBuilder<> &Bld,
     Value *z_enc = Bld.CreateAdd(a_enc, b_enc, "anb.z_enc");
 
     uint64_t Bz = (Ba + Bb);
+    return ANBValue{z_enc, Bz};
+}
+
+ANBValue llvm::createANBSub(IRBuilder<> &Bld,
+                            Value *a, uint64_t Ba,
+                            Value *b, uint64_t Bb,
+                            uint64_t A)
+{
+    LLVMContext &Ctx = Bld.getContext();
+    Type *I128 = Type::getInt128Ty(Ctx);
+
+    // Extend operands to i128 to avoid overflow/underflow during encoding.
+    Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
+    Value *b128 = Bld.CreateZExt(b, I128, "anb.b128");
+    Value *A128 = ConstantInt::get(I128, A);
+
+    // Encode: a_enc = a*A + Ba,  b_enc = b*A  + Bb
+    Value *a_mul = Bld.CreateMul(a128, A128, "anb.a_mul");
+    Value *a_enc = Bld.CreateAdd(a_mul, ConstantInt::get(I128, Ba), "anb.a_enc");
+    
+    Value *b_mul = Bld.CreateMul(b128, A128, "anb.b_mul");
+    Value *b_enc = Bld.CreateAdd(b_mul, ConstantInt::get(I128, Bb), "anb.b_enc");
+
+    // z_enc = a_enc - b_enc
+    Value *z_enc = Bld.CreateSub(a_enc, b_enc, "anb.z_enc");
+
+    uint64_t Bz = (A + (Ba % A) - (Bb % A)) % A;
     return ANBValue{z_enc, Bz};
 }
 
@@ -186,7 +216,9 @@ bool ANBPass::hasANBInstructions(BasicBlock &BB,
         if (isa<DbgInfoIntrinsic>(&I))  continue;
 
         if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
-            if (BO->getOpcode() == Instruction::Add &&
+            if ((BO->getOpcode() == Instruction::Add ||
+                 BO->getOpcode() == Instruction::Sub ||
+                 BO->getOpcode() == Instruction::Mul) &&
                 BO->getType()->isIntegerTy())
                 return true;
         }
@@ -254,7 +286,90 @@ void ANBPass::checkJumpSig(BasicBlock &BB,
     
     printSig(*BB.getModule(), B, newSig, "checkJumpSig - runtime_sig (after check)");
 }
+/*---------------------LOOP CONTROL-------------------------------*/
 
+void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRounds,
+    GlobalVariable *RuntimeSig,
+    GlobalVariable *PrevSig,
+     Module &Md) {
+    LLVMContext &Ctx = Md.getContext();
+    Type *I64 = Type::getInt64Ty(Ctx);
+
+    BasicBlock *PreHeaderBB = L->getLoopPreheader();
+    BasicBlock *Header = L->getHeader();
+    BasicBlock *ExitBB = L->getExitBlock();
+
+    BasicBlock *Latch = L->getLoopLatch();
+
+    if (!PreHeaderBB || !Header || !ExitBB || !Latch) return;
+
+    // ── Determine the bound ────────────────────────────────────────────────
+    // useExact = true  → user annotation, check cnt == expected
+    // useExact = false → SCEV max bound, check cnt <= maxBound
+    bool useExact = (expectedRounds > 0);
+    uint64_t maxBound = 0;
+
+    if (!useExact) {
+        // No user annotation: ask SCEV for the max back-edge taken count
+        const SCEV *MaxBTC = SE.getConstantMaxBackedgeTakenCount(L);
+        if (const auto *C = dyn_cast<SCEVConstant>(MaxBTC)) {
+            maxBound = C->getValue()->getZExtValue() + 1;  // +1: back-edge count → iteration count
+            errs() << "[ANB] SCEV max bound for loop: " << maxBound << " iterations\n";
+        } else {
+            // SCEV can't compute even a max → rely on checkJumpSig fallback
+            errs() << "[ANB] SCEV could not compute max bound, skipping loop instrumentation\n";
+            return;
+        }
+    } else {
+        errs() << "[ANB] User-annotated exact trip count: " << expectedRounds << "\n";
+    }
+
+    // ── 1. PREHEADER: initialize loop counter to 0 ─────────────────────────
+    IRBuilder<> PreB(PreHeaderBB->getTerminator());
+    AllocaInst *LoopCnt = PreB.CreateAlloca(I64, nullptr, "anb.loop_cnt");
+    PreB.CreateStore(ConstantInt::get(I64, 0), LoopCnt);
+
+    // ── 2. LATCH: increment counter at each iteration ────────────────────
+    // Use latch (not header) because the header runs N+1 times
+    // (includes the final exit-condition check), while the latch
+    // runs exactly N times — matching the user's trip_count.
+    IRBuilder<> LatchB(&*Latch->getFirstInsertionPt());
+    Value *cntLoad = LatchB.CreateLoad(I64, LoopCnt, "anb.cnt_load");
+    Value *cntInc  = LatchB.CreateAdd(cntLoad, ConstantInt::get(I64, 1), "anb.cnt_inc");
+    LatchB.CreateStore(cntInc, LoopCnt);
+
+    // ── 3. EXIT: verify and poison signature if violated ───────────────────
+    IRBuilder<> ExitB(&*ExitBB->getFirstInsertionPt());
+    Value *finalCnt = ExitB.CreateLoad(I64, LoopCnt, "anb.final_cnt");
+
+    Value *err = nullptr;
+
+    if (useExact) {
+        // EXACT CHECK: err = finalCnt - expectedRounds
+        // err == 0 when loop ran exactly expectedRounds times
+        Value *expectedV = ConstantInt::get(I64, expectedRounds);
+        err = ExitB.CreateSub(finalCnt, expectedV, "anb.loop_err_exact");
+        printSig(Md, ExitB, expectedV, "Loop exit - expected iterations (exact)");
+    } else {
+        // UPPER BOUND CHECK: if finalCnt > maxBound, compute excess
+        // excess = finalCnt - maxBound (only when finalCnt > maxBound)
+        // This is branchless: icmp + select, no skippable branch
+        Value *maxBoundV = ConstantInt::get(I64, maxBound);
+        Value *isOver    = ExitB.CreateICmpUGT(finalCnt, maxBoundV, "anb.is_over_max");
+        Value *excess    = ExitB.CreateSub(finalCnt, maxBoundV, "anb.excess");
+        err = ExitB.CreateSelect(isOver, excess, ConstantInt::get(I64, 0), "anb.loop_err_bound");
+        printSig(Md, ExitB, maxBoundV, "Loop exit - max bound (SCEV)");
+    }
+
+    printSig(Md, ExitB, finalCnt, "Loop exit - actual iterations");
+    printSig(Md, ExitB, err,      "Loop exit - error (should be 0)");
+
+    // Poison the runtime signature: sig += err
+    // If err != 0, the next checkJumpSig will detect the corruption
+    Value *sig    = ExitB.CreateLoad(I64, RuntimeSig, "anb.sig_load");
+    Value *newSig = ExitB.CreateAdd(sig, err, "anb.sig_upd_loop");
+    ExitB.CreateStore(newSig, RuntimeSig);
+}
 /*
  * Saves the current runtime_sig into anb_prev_sig before the BB terminator.
  * This snapshot will be compared at the start of the next BB.
@@ -320,14 +435,61 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
     std::mt19937_64 rng(std::random_device{}());
     // Biases are drawn from [1, A-1] so they are always non-zero.
     std::uniform_int_distribution<uint64_t> biasDist(1, ANB_DEFAULT_A - 1);
-
+    FunctionAnalysisManager &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(Md).getManager();
     for (Function &Fn : Md) {
         if (!shouldCompile(Fn, FuncAnnotations)) continue;
-
+        uint64_t expectedRounds = 0;
         // Initialize compile-time signatures for this function
         createSignature(Fn);
+        //Find trip_count annotation by scanning all global annotations for this function
+        if (GlobalVariable *GA = Md.getGlobalVariable("llvm.global.annotations")) {
+            for (Value *AOp : GA->operands()) {
+                if (auto *CA = dyn_cast<ConstantArray>(AOp)) {
+                    for (Value *CAOp : CA->operands()) {
+                        if (auto *CS = dyn_cast<ConstantStruct>(CAOp)) {
+                            if (CS->getNumOperands() >= 2 && CS->getOperand(0) == &Fn) {
+                                if (auto *GAnn = dyn_cast<GlobalVariable>(CS->getOperand(1))) {
+                                    if (auto *A = dyn_cast<ConstantDataArray>(GAnn->getOperand(0))) {
+                                        StringRef annot = A->getAsString();
+                                        if (annot.starts_with("trip_count_")) {
+                                            StringRef numStr = annot.drop_front(11);
+                                            // getAsString includes trailing \0, strip it
+                                            numStr = numStr.rtrim('\0');
+                                            if (!numStr.getAsInteger(10, expectedRounds)) {
+                                                errs() << "[ANB] Found trip_count annotation: " << expectedRounds << "\n";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        auto &LI  = FAM.getResult<LoopAnalysis>(Fn);
+        auto &SE  = FAM.getResult<ScalarEvolutionAnalysis>(Fn);
 
-        // ── Pass 1: identify BBs with ANB-protectable instructions ────────
+        // Per ogni loop top-level
+        for (Loop *L : LI) {
+            checkLoopCount(L, SE, expectedRounds, RuntimeSig, PrevSig,Md);
+
+        }
+        // Collect all BBs inside loops (protected by checkLoopCount)
+        SmallPtrSet<BasicBlock *, 16> loopBBs;
+        for (Loop *L : LI.getLoopsInPreorder()) {
+            for (BasicBlock *BB : L->blocks()) {
+                loopBBs.insert(BB);
+            }
+            // Also exclude loop exit blocks (verified by checkLoopCount)
+            SmallVector<BasicBlock *, 4> exitBlocks;
+            L->getExitBlocks(exitBlocks);
+            for (BasicBlock *EB : exitBlocks) {
+                loopBBs.insert(EB);
+            }
+        }
+
+        // Pass 1: identify BBs with ANB-protectable instructions
         SmallVector<BasicBlock *, 16> anbBBs;
         for (BasicBlock &BB : Fn) {
             StringRef bbName = BB.getName();
@@ -370,12 +532,13 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 printSig(Md, BEntry, sigVal, "Entry BB Init Signature");
             }
 
-            // ── Inter-BB check (only if this BB has ANB instructions) ──────
-            if (bbHasANB) {
+            // Inter-BB check (only if this BB has ANB instructions) ──────
+            // Skip loop headers: they are already protected by checkLoopCount
+            if (bbHasANB && !loopBBs.count(&BB)) {
                 checkJumpSig(BB, RuntimeSig, PrevSig);
             }
 
-            // ── Collect original instructions ─────────────────────────────
+            //  Collect original instructions ─────────────────────────────
             SmallVector<Instruction *, 16> origInstrs;
             for (Instruction &I : BB) {
                 if (isa<PHINode>(&I))           continue;
@@ -385,7 +548,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 origInstrs.push_back(&I);
             }
 
-            // ── ANB-encode each protectable instruction ───────────────────
+            //  ANB-encode each protectable instruction ───────────────────
             for (Instruction *I : origInstrs) {
                 auto *BO = dyn_cast<BinaryOperator>(I);
                 if (BO && BO->getOpcode() == Instruction::Add &&
@@ -415,6 +578,35 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     Value *newSig = B.CreateAdd(sig, check, "anb.sig_upd");
                     B.CreateStore(newSig, RuntimeSig);
                     printSig(Md, B, newSig, "After Add Instr - runtime_sig");
+                    continue;
+                }
+                
+                //------------subtraction---------------------//
+                if (BO && BO->getOpcode() == Instruction::Sub &&
+                    BO->getType()->isIntegerTy()) {
+                    Instruction *insertPt = I->getNextNode();
+                    if (!insertPt) continue;
+                    IRBuilder<> B(insertPt);
+                    uint64_t Ba = biasDist(rng);
+                    uint64_t Bb = biasDist(rng);
+
+                    Value *op0 = BO->getOperand(0);
+                    Value *op1 = BO->getOperand(1);
+                    if (!op0->getType()->isIntegerTy(64))
+                        op0 = B.CreateZExt(op0, I64, "anb.op0_64");
+                    if (!op1->getType()->isIntegerTy(64))
+                        op1 = B.CreateZExt(op1, I64, "anb.op1_64");
+
+                    ANBValue av = createANBSub(B, op0, Ba, op1, Bb, ANB_DEFAULT_A);
+
+                    Value *check = checkSig(Md, av, B);
+
+                    Value *sig    = B.CreateLoad(I64, RuntimeSig, "anb.sig_load");
+                    printSig(Md, B, sig, "Before Sub Instr - runtime_sig");
+                    
+                    Value *newSig = B.CreateAdd(sig, check, "anb.sig_upd");
+                    B.CreateStore(newSig, RuntimeSig);
+                    printSig(Md, B, newSig, "After Sub Instr - runtime_sig");
                     continue;
                 }
                 //------compare------------//
@@ -472,7 +664,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     Value  *increment_i64 = checkSig(Md,av, B);
                     // runtime_sig += increment_i64 (1 se ok, 0 se manomesso)
                     Value *sig    = B.CreateLoad(I64, RuntimeSig, "anb.sig_load");
-                    printSig(Md, B, sig, "Before Add Instr - runtime_sig");
+                    printSig(Md, B, sig, "Before Mul Instr - runtime_sig");
 
                     Value *newSig = B.CreateAdd(sig, increment_i64, "anb.sig_upd");
                     B.CreateStore(newSig, RuntimeSig);
@@ -483,7 +675,8 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
             } // for each original instruction
 
             // ── Check della Return ─────────────────────────────────────────
-            if (isa<ReturnInst>(BB.getTerminator())) {
+            // Skip loop exit BBs: they are protected by checkLoopCount
+            if (isa<ReturnInst>(BB.getTerminator()) && !loopBBs.count(&BB)) {
                 checkOnReturn(BB, RuntimeSig, PrevSig);
             }
 
