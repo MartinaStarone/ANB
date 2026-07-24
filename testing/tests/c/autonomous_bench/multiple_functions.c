@@ -20,6 +20,35 @@ void SigMismatch_Handler(void) {
     exit(3);
 }
 
+// --- Funzioni di supporto matematico a 128-bit per l'AES su RISC-V 32-bit ---
+typedef unsigned _BitInt(128) uint128_t;
+
+uint128_t __udivti3(uint128_t dividend, uint128_t divisor) {
+    if (divisor == 0) return 0;
+    uint128_t quotient = 0;
+    uint128_t remainder = 0;
+    for (int i = 127; i >= 0; i--) {
+        remainder = (remainder << 1) | ((dividend >> i) & 1);
+        if (remainder >= divisor) {
+            remainder -= divisor;
+            quotient |= ((uint128_t)1 << i);
+        }
+    }
+    return quotient;
+}
+
+uint128_t __umodti3(uint128_t dividend, uint128_t divisor) {
+    if (divisor == 0) return 0;
+    uint128_t remainder = 0;
+    for (int i = 127; i >= 0; i--) {
+        remainder = (remainder << 1) | ((dividend >> i) & 1);
+        if (remainder >= divisor) {
+            remainder -= divisor;
+        }
+    }
+    return remainder;
+}
+
 /* -------------------------------------------------------------------
  * Application entry point.
  * Replace the body with your program logic.
@@ -43,6 +72,7 @@ void SigMismatch_Handler(void) {
 
 int expo(int);
 
+__attribute__((annotate("trip_count_10")))
 int main(int argc, char **argv) {
     int i = 0;
     int j = 2;

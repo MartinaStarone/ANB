@@ -45,17 +45,16 @@ ANBValue llvm::createANBadd(IRBuilder<> &Bld,
 {
     LLVMContext &Ctx = Bld.getContext();
     Type *I128 = Type::getInt128Ty(Ctx);
-    Type *I64  = Type::getInt64Ty(Ctx);
 
     // Extend operands to i128 to avoid overflow during encoding.
     Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
     Value *b128 = Bld.CreateZExt(b, I128, "anb.b128");
     Value *A128 = ConstantInt::get(I128, A);
 
-    // Encode: a_enc = a*A + Ba,  b_enc = b*A  + Bb
+    // a_enc = a * A + Ba
     Value *a_mul = Bld.CreateMul(a128, A128, "anb.a_mul");
     Value *a_enc = Bld.CreateAdd(a_mul, ConstantInt::get(I128, Ba), "anb.a_enc");
-    // Encode corretto: b_enc = b * A + Bb
+    // b_enc = b * A + Bb
     Value *b_mul = Bld.CreateMul(b128, A128, "anb.b_mul");
     Value *b_enc = Bld.CreateAdd(b_mul, ConstantInt::get(I128, Bb), "anb.b_enc");
 
@@ -63,7 +62,7 @@ ANBValue llvm::createANBadd(IRBuilder<> &Bld,
     // z_enc = a_enc + b_enc  (= (a+b)*A + (Ba+Bb))
     Value *z_enc = Bld.CreateAdd(a_enc, b_enc, "anb.z_enc");
 
-    uint64_t Bz = (Ba + Bb);
+    uint64_t Bz = (Ba + Bb) % A;
     return ANBValue{z_enc, Bz};
 }
 
@@ -80,10 +79,10 @@ ANBValue llvm::createANBSub(IRBuilder<> &Bld,
     Value *b128 = Bld.CreateZExt(b, I128, "anb.b128");
     Value *A128 = ConstantInt::get(I128, A);
 
-    // Encode: a_enc = a*A + Ba,  b_enc = b*A  + Bb
+    // a_enc = a * A + Ba
     Value *a_mul = Bld.CreateMul(a128, A128, "anb.a_mul");
     Value *a_enc = Bld.CreateAdd(a_mul, ConstantInt::get(I128, Ba), "anb.a_enc");
-    
+    // b_enc = b * A + Bb
     Value *b_mul = Bld.CreateMul(b128, A128, "anb.b_mul");
     Value *b_enc = Bld.CreateAdd(b_mul, ConstantInt::get(I128, Bb), "anb.b_enc");
 
@@ -101,22 +100,20 @@ ANBValue llvm::createANBMul(IRBuilder<> &Bld,Value *a, uint64_t Ba,
 
     LLVMContext &Ctx = Bld.getContext();
     Type *I128 = Type::getInt128Ty(Ctx);
-    Type *I64  = Type::getInt64Ty(Ctx);
-    Value *A64 = ConstantInt::get(I64, A);
     Value *A128 = ConstantInt::get(I128, A);
 
     Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
     Value *b128 = Bld.CreateZExt(b, I128, "anb.b128");
 
-    // Encode: a_enc = a*A + Ba,  b_enc = b*A  + Bb
+    // a_enc = a * A + Ba
     Value *a_mul = Bld.CreateMul(a128, A128, "anb.a_mul");
     Value *a_enc = Bld.CreateAdd(a_mul, ConstantInt::get(I128, Ba), "anb.a_enc");
-    // Encode corretto: b_enc = b * A + Bb
+    // b_enc = b * A + Bb
     Value *b_mul = Bld.CreateMul(b128, A128, "anb.b_mul");
     Value *b_enc = Bld.CreateAdd(b_mul, ConstantInt::get(I128, Bb), "anb.b_enc");
 
-    Value *result = Bld.CreateMul(a_enc, b_enc, "anb_res");//result = A^2 *a*b+
-                                                                            //          +A*a*Bb+ A*b*Ba+Bx*By
+    Value *result = Bld.CreateMul(a_enc, b_enc, "anb_res");
+
     Value *div_res = Bld.CreateUDiv(result, A128, "anb.div");
     Value *mod_res = Bld.CreateURem(div_res, A128, "anb.mod");
     Value *tmp1 = Bld.CreateMul(mod_res, A128, "tmp");
@@ -126,7 +123,7 @@ ANBValue llvm::createANBMul(IRBuilder<> &Bld,Value *a, uint64_t Ba,
     Value *res2 = Bld.CreateUDiv(res, A128, "middle2");
     Value *res_f = Bld.CreateAdd(res2, tmp2, "result");
 
-    uint64_t Bz = (Ba*Bb);
+    uint64_t Bz = (Ba*Bb) % A;
     return ANBValue{res_f, Bz};
 
 }
@@ -304,8 +301,8 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
     if (!PreHeaderBB || !Header || !ExitBB || !Latch) return;
 
     // ── Determine the bound ────────────────────────────────────────────────
-    // useExact = true  → user annotation, check cnt == expected
-    // useExact = false → SCEV max bound, check cnt <= maxBound
+    // useExact = true  ->user annotation, check cnt == expected
+    // useExact = false -> SCEV max bound, check cnt <= maxBound
     bool useExact = (expectedRounds > 0);
     uint64_t maxBound = 0;
 
@@ -316,7 +313,8 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
             maxBound = C->getValue()->getZExtValue() + 1;  // +1: back-edge count → iteration count
             errs() << "[ANB] SCEV max bound for loop: " << maxBound << " iterations\n";
         } else {
-            // SCEV can't compute even a max → rely on checkJumpSig fallback
+            //TODO: controlla se funziona
+            // SCEV can't compute even a max ->rely on checkJumpSig fallback
             errs() << "[ANB] SCEV could not compute max bound, skipping loop instrumentation\n";
             return;
         }
@@ -391,14 +389,14 @@ Value *ANBPass::checkSig(llvm::Module &Md, ANBValue av, IRBuilder<> &B) {
     // error64 = (z_enc % A) - Bz
     // == 0 when the add executed correctly,
     // != 0 when a or b was wrong/skipped.
-    Type *I64 = B.getInt64Ty();
+    Type   *I64    = Type::getInt64Ty(Md.getContext());
     Type   *I128   = Type::getInt128Ty(Md.getContext());
     Value  *A128   = ConstantInt::get(I128, ANB_DEFAULT_A);
     Value  *Bz128  = ConstantInt::get(I128, av.B);
     // z encoded modulo A == Bz128
     Value  *zModA  = B.CreateURem(av.encoded, A128, "anb.z_mod_A");
 
-    // (true = 1 se ok, false = 0 se alterato)
+    // %anb.is_correct_i1 = icmp eq i128 %anb.z_mod_A, Bz128 (true = 1 se ok, false = 0 se alterato)
     Value  *is_correct_i1 = B.CreateICmpEQ(zModA, Bz128, "anb.is_correct_i1");
 
     Value  *increment_i64 = B.CreateZExt(is_correct_i1, I64, "anb.increment_i64");
