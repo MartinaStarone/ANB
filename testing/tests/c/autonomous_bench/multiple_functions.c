@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
-
+//#include "pico/stdlib.h"
+#define PICO_DEFAULT_LED_PIN 25
 /* -------------------------------------------------------------------
  * ASPIS fault handlers - required by the hardening pipeline.
  * DataCorruption_Handler: called when a duplicated variable mismatch
@@ -23,31 +24,7 @@ void SigMismatch_Handler(void) {
 // --- Funzioni di supporto matematico a 128-bit per l'AES su RISC-V 32-bit ---
 typedef unsigned _BitInt(128) uint128_t;
 
-uint128_t __udivti3(uint128_t dividend, uint128_t divisor) {
-    if (divisor == 0) return 0;
-    uint128_t quotient = 0;
-    uint128_t remainder = 0;
-    for (int i = 127; i >= 0; i--) {
-        remainder = (remainder << 1) | ((dividend >> i) & 1);
-        if (remainder >= divisor) {
-            remainder -= divisor;
-            quotient |= ((uint128_t)1 << i);
-        }
-    }
-    return quotient;
-}
 
-uint128_t __umodti3(uint128_t dividend, uint128_t divisor) {
-    if (divisor == 0) return 0;
-    uint128_t remainder = 0;
-    for (int i = 127; i >= 0; i--) {
-        remainder = (remainder << 1) | ((dividend >> i) & 1);
-        if (remainder >= divisor) {
-            remainder -= divisor;
-        }
-    }
-    return remainder;
-}
 
 /* -------------------------------------------------------------------
  * Application entry point.
@@ -74,6 +51,7 @@ int expo(int);
 
 __attribute__((annotate("trip_count_10")))
 int main(int argc, char **argv) {
+
     int i = 0;
     int j = 2;
     int w = 3;
@@ -95,6 +73,21 @@ int main(int argc, char **argv) {
     for(i = 0; i < 10; i++){
         printf("z[%d] = %d\n", i, z[i]);
     }
+    /*gpio_init(PICO_DEFAULT_LED_PIN);
+    gpio_set_dir(PICO_DEFAULT_LED_PIN, 1);  // 1 = output
+    while(1) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 1);  // LED acceso
+
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);  // LED spento
+
+    }  gpio_init(PICO_DEFAULT_LED_PIN);
+    gpio_set_dir(PICO_DEFAULT_LED_PIN, 1);  // 1 = output
+    while(1) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 1);  // LED acceso
+
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);  // LED spento
+
+    }*/
 
     return 0;
 }

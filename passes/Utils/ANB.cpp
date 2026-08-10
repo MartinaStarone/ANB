@@ -5,6 +5,8 @@
 #include "Utils.h"
 
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -44,7 +46,7 @@ ANBValue llvm::createANBadd(IRBuilder<> &Bld,
                             uint64_t A)
 {
     LLVMContext &Ctx = Bld.getContext();
-    Type *I128 = Type::getInt128Ty(Ctx);
+    Type *I128 = Type::getInt64Ty(Ctx);
 
     // Extend operands to i128 to avoid overflow during encoding.
     Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
@@ -72,7 +74,7 @@ ANBValue llvm::createANBSub(IRBuilder<> &Bld,
                             uint64_t A)
 {
     LLVMContext &Ctx = Bld.getContext();
-    Type *I128 = Type::getInt128Ty(Ctx);
+    Type *I128 = Type::getInt64Ty(Ctx);
 
     // Extend operands to i128 to avoid overflow/underflow during encoding.
     Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
@@ -99,7 +101,7 @@ ANBValue llvm::createANBMul(IRBuilder<> &Bld,Value *a, uint64_t Ba,
                             uint64_t A ) {
 
     LLVMContext &Ctx = Bld.getContext();
-    Type *I128 = Type::getInt128Ty(Ctx);
+    Type *I128 = Type::getInt64Ty(Ctx);
     Value *A128 = ConstantInt::get(I128, A);
 
     Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
@@ -196,8 +198,11 @@ void ANBPass::checkOnReturn(BasicBlock &BB,
     Value *cur  = ControlIR.CreateLoad(I64, RuntimeSig, "anb.cur_sig_ret");
 
     Value *diff = ControlIR.CreateSub(cur, prev, "anb.sig_diff_ret");
-    Value *check = ControlIR.CreateUDiv(ConstantInt::get(I64, 1), diff, "anb.div_check_ret");
+    
+    // Normal signature update (dummy check to preserve data dependency)
+    Value *check = ControlIR.CreateUDiv(ConstantInt::get(I64, 1), diff, "anb.div_check_ret_dummy");
     Value *newSig = ControlIR.CreateAdd(cur, check, "anb.sig_checked_ret");
+    
     ControlIR.CreateStore(newSig, RuntimeSig);
     ControlIR.CreateBr(&BB);
 }
@@ -274,10 +279,8 @@ void ANBPass::checkJumpSig(BasicBlock &BB,
 
     Value *diff = B.CreateSub(cur, prev,          "anb.sig_diff");
 
-    // udiv 1 / diff  →  SIGFPE when diff == 0 (instruction was skipped)
-    // When diff > 0 (normal), result is 0 (integer division) → no effect
-    Value *check  = B.CreateUDiv(ConstantInt::get(I64, 1), diff,
-                                 "anb.div_check");
+    // Normal signature update (dummy check to preserve data dependency)
+    Value *check  = B.CreateUDiv(ConstantInt::get(I64, 1), diff, "anb.div_check_dummy");
     Value *newSig = B.CreateAdd(cur, check, "anb.sig_checked");
     B.CreateStore(newSig, RuntimeSig);
     
@@ -362,10 +365,22 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
     printSig(Md, ExitB, finalCnt, "Loop exit - actual iterations");
     printSig(Md, ExitB, err,      "Loop exit - error (should be 0)");
 
+    // Branchless Memory Trap: Load from 0xFFFFFFFF if err != 0
+    Value *isErr = ExitB.CreateICmpNE(err, ConstantInt::get(I64, 0), "anb.loop_has_err");
+    Value *isErrI64 = ExitB.CreateZExt(isErr, I64, "anb.loop_err_i64");
+    Value *badAddrMask = ExitB.CreateMul(isErrI64, ConstantInt::get(I64, -1ULL), "anb.loop_bad_addr_mask");
+    Value *validAddr = ExitB.CreatePtrToInt(RuntimeSig, I64, "anb.loop_valid_addr");
+    Value *targetAddr = ExitB.CreateOr(validAddr, badAddrMask, "anb.loop_target_addr");
+    Value *targetPtr = ExitB.CreateIntToPtr(targetAddr, RuntimeSig->getType(), "anb.loop_target_ptr");
+    Value *faultLoad = ExitB.CreateLoad(I64, targetPtr, true, "anb.loop_fault_load"); // volatile load
+    
+    // Data dependency to prevent DCE: add to the signature poisoning
+    Value *zeroFromFault = ExitB.CreateMul(faultLoad, ConstantInt::get(I64, 0), "anb.loop_zero_from_fault");
+    Value *errWithFault = ExitB.CreateAdd(err, zeroFromFault, "anb.err_with_fault");
+
     // Poison the runtime signature: sig += err
-    // If err != 0, the next checkJumpSig will detect the corruption
     Value *sig    = ExitB.CreateLoad(I64, RuntimeSig, "anb.sig_load");
-    Value *newSig = ExitB.CreateAdd(sig, err, "anb.sig_upd_loop");
+    Value *newSig = ExitB.CreateAdd(sig, errWithFault, "anb.sig_upd_loop");
     ExitB.CreateStore(newSig, RuntimeSig);
 }
 /*
@@ -390,7 +405,7 @@ Value *ANBPass::checkSig(llvm::Module &Md, ANBValue av, IRBuilder<> &B) {
     // == 0 when the add executed correctly,
     // != 0 when a or b was wrong/skipped.
     Type   *I64    = Type::getInt64Ty(Md.getContext());
-    Type   *I128   = Type::getInt128Ty(Md.getContext());
+    Type   *I128   = Type::getInt64Ty(Md.getContext());
     Value  *A128   = ConstantInt::get(I128, ANB_DEFAULT_A);
     Value  *Bz128  = ConstantInt::get(I128, av.B);
     // z encoded modulo A == Bz128
@@ -402,7 +417,6 @@ Value *ANBPass::checkSig(llvm::Module &Md, ANBValue av, IRBuilder<> &B) {
     Value  *increment_i64 = B.CreateZExt(is_correct_i1, I64, "anb.increment_i64");
 
     return increment_i64;
-
 }
 
 PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
@@ -560,6 +574,8 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     // ZExt a i64 se necessario (es. operandi i32)
                     Value *op0 = BO->getOperand(0);
                     Value *op1 = BO->getOperand(1);
+                    if (op0->getType()->getIntegerBitWidth() > 64 ||op1->getType()->getIntegerBitWidth() > 64)
+                        continue;
                     if (!op0->getType()->isIntegerTy(64))
                         op0 = B.CreateZExt(op0, I64, "anb.op0_64");
                     if (!op1->getType()->isIntegerTy(64))
@@ -590,6 +606,8 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
 
                     Value *op0 = BO->getOperand(0);
                     Value *op1 = BO->getOperand(1);
+                    if (op0->getType()->getIntegerBitWidth() > 64 || op1->getType()->getIntegerBitWidth() > 64)
+                        continue;
                     if (!op0->getType()->isIntegerTy(64))
                         op0 = B.CreateZExt(op0, I64, "anb.op0_64");
                     if (!op1->getType()->isIntegerTy(64))
@@ -608,7 +626,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     continue;
                 }
                 //------compare------------//
-                auto *CI = dyn_cast<ICmpInst>(I);
+               /* auto *CI = dyn_cast<ICmpInst>(I);
                 if (CI && CI->getPredicate() == ICmpInst::ICMP_EQ &&
                     CI->getOperand(0)->getType()->isIntegerTy())  // i32 e i64
                 {
@@ -641,7 +659,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     B.CreateStore(newSig, RuntimeSig);
                     printSig(Md, B, newSig, "After Cmp Instr - runtime_sig");
                     continue;
-                }
+                }*/
                 //------------multiplication---------------------//
                 if (BO && BO->getOpcode() == Instruction::Mul &&
                         BO->getType()->isIntegerTy()) {  // i32 e i64
@@ -653,6 +671,8 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     // ZExt a i64 se necessario (es. operandi i32)
                     Value *op0 = BO->getOperand(0);
                     Value *op1 = BO->getOperand(1);
+                    if (op0->getType()->getIntegerBitWidth() > 64 || op1->getType()->getIntegerBitWidth() > 64)
+                        continue;
                     if (!op0->getType()->isIntegerTy(64))
                         op0 = B.CreateZExt(op0, I64, "anb.op0_64");
                     if (!op1->getType()->isIntegerTy(64))
