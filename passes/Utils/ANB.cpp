@@ -256,8 +256,8 @@ void ANBPass::createSignature(Function &F) {
  */
 void ANBPass::checkJumpSig(BasicBlock &BB,
                            GlobalVariable *RuntimeSig,
-                           GlobalVariable *PrevSig) {
-    if (BB.isEntryBlock()) return;
+                           GlobalVariable *PrevSig,
+                           uint64_t expectedDiff) {
 //------no more RACFED-----------//
     // Skip RACFED-injected blocks
     StringRef bbName = BB.getName();
@@ -267,8 +267,10 @@ void ANBPass::checkJumpSig(BasicBlock &BB,
         bbName.contains_insensitive("verification"))
         return;
 
-    // Insert at the very beginning of the BB (after PHIs)
-    IRBuilder<> B(&*BB.getFirstInsertionPt());
+    // Insert at the END of the BB (before terminator, but before saveSnapshot)
+    Instruction *Term = BB.getTerminator();
+    if (!Term) return;
+    IRBuilder<> B(Term);
     Type *I64 = B.getInt64Ty();
 
     Value *prev = B.CreateLoad(I64, PrevSig,    "anb.prev_sig");
@@ -277,11 +279,23 @@ void ANBPass::checkJumpSig(BasicBlock &BB,
     printSig(*BB.getModule(), B, prev, "checkJumpSig - anb_prev_sig");
     printSig(*BB.getModule(), B, cur,  "checkJumpSig - runtime_sig (cur)");
 
-    Value *diff = B.CreateSub(cur, prev,          "anb.sig_diff");
-
-    // Normal signature update (dummy check to preserve data dependency)
-    Value *check  = B.CreateUDiv(ConstantInt::get(I64, 1), diff, "anb.div_check_dummy");
-    Value *newSig = B.CreateAdd(cur, check, "anb.sig_checked");
+    Value *diff = B.CreateSub(cur, prev, "anb.sig_diff");
+    Value *expected = ConstantInt::get(I64, expectedDiff);
+    
+    Value *err = B.CreateSub(diff, expected, "anb.sig_err");
+    Value *isErr = B.CreateICmpNE(err, ConstantInt::get(I64, 0), "anb.has_err");
+    
+    // Branchless memory trap
+    Value *isErrI64 = B.CreateZExt(isErr, I64, "anb.err_i64");
+    Value *badAddrMask = B.CreateMul(isErrI64, ConstantInt::get(I64, -1ULL), "anb.bad_addr_mask");
+    Value *validAddr = B.CreatePtrToInt(RuntimeSig, I64, "anb.valid_addr");
+    Value *targetAddr = B.CreateOr(validAddr, badAddrMask, "anb.target_addr");
+    Value *targetPtr = B.CreateIntToPtr(targetAddr, RuntimeSig->getType(), "anb.target_ptr");
+    Value *faultLoad = B.CreateLoad(I64, targetPtr, true, "anb.fault_load"); // volatile load
+    
+    // Data dependency to prevent DCE
+    Value *zeroFromFault = B.CreateMul(faultLoad, ConstantInt::get(I64, 0), "anb.zero_from_fault");
+    Value *newSig = B.CreateAdd(cur, zeroFromFault, "anb.sig_checked");
     B.CreateStore(newSig, RuntimeSig);
     
     printSig(*BB.getModule(), B, newSig, "checkJumpSig - runtime_sig (after check)");
@@ -303,7 +317,7 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
 
     if (!PreHeaderBB || !Header || !ExitBB || !Latch) return;
 
-    // ── Determine the bound ────────────────────────────────────────────────
+    //  Determine the bound ────────────────────────────────────────────────
     // useExact = true  ->user annotation, check cnt == expected
     // useExact = false -> SCEV max bound, check cnt <= maxBound
     bool useExact = (expectedRounds > 0);
@@ -325,12 +339,12 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
         errs() << "[ANB] User-annotated exact trip count: " << expectedRounds << "\n";
     }
 
-    // ── 1. PREHEADER: initialize loop counter to 0 ─────────────────────────
+    // 1. PREHEADER: initialize loop counter to 0 ─────────────────────────
     IRBuilder<> PreB(PreHeaderBB->getTerminator());
     AllocaInst *LoopCnt = PreB.CreateAlloca(I64, nullptr, "anb.loop_cnt");
     PreB.CreateStore(ConstantInt::get(I64, 0), LoopCnt);
 
-    // ── 2. LATCH: increment counter at each iteration ────────────────────
+    // 2. LATCH: increment counter at each iteration ────────────────────
     // Use latch (not header) because the header runs N+1 times
     // (includes the final exit-condition check), while the latch
     // runs exactly N times — matching the user's trip_count.
@@ -339,7 +353,7 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
     Value *cntInc  = LatchB.CreateAdd(cntLoad, ConstantInt::get(I64, 1), "anb.cnt_inc");
     LatchB.CreateStore(cntInc, LoopCnt);
 
-    // ── 3. EXIT: verify and poison signature if violated ───────────────────
+    // 3. EXIT: verify and poison signature if violated ───────────────────
     IRBuilder<> ExitB(&*ExitBB->getFirstInsertionPt());
     Value *finalCnt = ExitB.CreateLoad(I64, LoopCnt, "anb.final_cnt");
 
@@ -544,29 +558,25 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 printSig(Md, BEntry, sigVal, "Entry BB Init Signature");
             }
 
-            // Inter-BB check (only if this BB has ANB instructions) ──────
-            // Skip loop headers: they are already protected by checkLoopCount
-            if (bbHasANB && !loopBBs.count(&BB)) {
-                checkJumpSig(BB, RuntimeSig, PrevSig);
-            }
-
             //  Collect original instructions ─────────────────────────────
             SmallVector<Instruction *, 16> origInstrs;
             for (Instruction &I : BB) {
                 if (isa<PHINode>(&I))           continue;
                 if (I.isTerminator())           continue;
                 if (isa<DbgInfoIntrinsic>(&I))  continue;
-                //if (isRACFEDInstruction(&I, RuntimeSig)) continue;
+                if (I.getName().starts_with("anb.")) continue;
                 origInstrs.push_back(&I);
             }
 
             //  ANB-encode each protectable instruction ───────────────────
+            uint64_t expectedDiff = 0;
             for (Instruction *I : origInstrs) {
                 auto *BO = dyn_cast<BinaryOperator>(I);
                 if (BO && BO->getOpcode() == Instruction::Add &&
                     BO->getType()->isIntegerTy()) {  // i32 e i64
                     Instruction *insertPt = I->getNextNode();
                     if (!insertPt) continue;
+                    expectedDiff++;
                     IRBuilder<> B(insertPt);
                     uint64_t Ba = biasDist(rng);
                     uint64_t Bb = biasDist(rng);
@@ -600,6 +610,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     BO->getType()->isIntegerTy()) {
                     Instruction *insertPt = I->getNextNode();
                     if (!insertPt) continue;
+                    expectedDiff++;
                     IRBuilder<> B(insertPt);
                     uint64_t Ba = biasDist(rng);
                     uint64_t Bb = biasDist(rng);
@@ -665,6 +676,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                         BO->getType()->isIntegerTy()) {  // i32 e i64
                     Instruction *insertPt = I->getNextNode();
                     if (!insertPt) continue;
+                    expectedDiff++;
                     IRBuilder<> B(insertPt);
                     uint64_t Ba = biasDist(rng);
                     uint64_t Bb = biasDist(rng);
@@ -692,11 +704,13 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
 
             } // for each original instruction
 
-            // ── Check della Return ─────────────────────────────────────────
-            // Skip loop exit BBs: they are protected by checkLoopCount
-            if (isa<ReturnInst>(BB.getTerminator()) && !loopBBs.count(&BB)) {
-                checkOnReturn(BB, RuntimeSig, PrevSig);
+            // --- STRICT BB VERIFICATION ---
+            if (bbHasANB) {
+                checkJumpSig(BB, RuntimeSig, PrevSig, expectedDiff);
             }
+
+            // ── Check della Return ─────────────────────────────────────────
+            // We replaced checkOnReturn with the strict BB verification above.
 
             // ── Snapshot: save runtime_sig before leaving this BB ──────────
             if (bbHasANB) {

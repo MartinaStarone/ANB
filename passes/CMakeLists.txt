@@ -64,6 +64,8 @@ add_library(RACFED SHARED
 #       both libRACFED.so and libANB.so are loaded by opt.
 add_library(ANB SHARED
 		Utils/ANB.cpp
+		../AES_testing/aes.c
+		../AES_testing/main_test.c
 )
 target_link_libraries(ANB PRIVATE Utils)
 

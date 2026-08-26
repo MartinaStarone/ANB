@@ -120,11 +120,12 @@ private:
     /// Creates a compile-time signature for the basic blocks.
     void createSignature(llvm::Function &F);
 
-    /// Inter-BB check: verifies runtime_sig was updated (+1) in the previous BB.
-    /// Uses udiv 1/diff to crash (SIGFPE) if diff==0 (i.e. the +1 was skipped).
+    /// Inter-BB check: verifies runtime_sig was updated (+expectedDiff) in the BB.
+    /// Uses branchless memory trap to crash (SIGSEGV) if diff != expectedDiff.
     void checkJumpSig(llvm::BasicBlock &BB,
                       llvm::GlobalVariable *RuntimeSig,
-                      llvm::GlobalVariable *PrevSig);
+                      llvm::GlobalVariable *PrevSig,
+                      uint64_t expectedDiff);
 
     void checkLoopCount(llvm::Loop *L, llvm::ScalarEvolution &SE, uint64_t expectedRounds,
                         llvm::GlobalVariable *RuntimeSig,
