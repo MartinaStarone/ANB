@@ -150,6 +150,52 @@ Value *llvm::createANBSetEq(IRBuilder<> &B, Value *a, uint64_t Ba, Value *b, uin
     return sigCond;
 }
 
+ANBValue llvm::createANBXOR(IRBuilder<> &Bld, Value *a, uint64_t Ba, Value *b, uint64_t Bb, uint64_t A) {
+    Type *I64 = Bld.getInt64Ty();
+    Value *final_enc = ConstantInt::get(I64, 0);
+    uint64_t final_B = 0;
+
+    for (int i = 0; i < 8; i++) {
+        // bit_a = (a >> i) & 1
+        Value *shift_a = Bld.CreateLShr(a, ConstantInt::get(a->getType(), i), "shr_a");
+        Value *bit_a = Bld.CreateAnd(shift_a, ConstantInt::get(a->getType(), 1), "bit_a");
+        Value *bit_a64 = Bld.CreateZExtOrTrunc(bit_a, I64, "bit_a64");
+
+        // bit_b = (b >> i) & 1
+        Value *shift_b = Bld.CreateLShr(b, ConstantInt::get(b->getType(), i), "shr_b");
+        Value *bit_b = Bld.CreateAnd(shift_b, ConstantInt::get(b->getType(), 1), "bit_b");
+        Value *bit_b64 = Bld.CreateZExtOrTrunc(bit_b, I64, "bit_b64");
+
+        // sum = createANBadd(bit_a, bit_b)
+        ANBValue sum = createANBadd(Bld, bit_a64, Ba, bit_b64, Bb, A);
+        
+        // mul = createANBMul(bit_a, bit_b)
+        ANBValue mul = createANBMul(Bld, bit_a64, Ba, bit_b64, Bb, A);
+
+        // mul2 = mul.encoded * 2
+        Value *mul2 = Bld.CreateMul(mul.encoded, ConstantInt::get(mul.encoded->getType(), 2), "mul2");
+        uint64_t mul2_B = (mul.B * 2) % A;
+
+        // bit_xor_enc = sum.encoded - mul2
+        Value *sum_enc_ext = Bld.CreateZExtOrTrunc(sum.encoded, mul2->getType());
+        Value *bit_xor_enc = Bld.CreateSub(sum_enc_ext, mul2, "bit_xor_enc");
+        
+        // Bias math: (sum.B - 2*mul.B) mod A
+        uint64_t bit_xor_B = (A + (sum.B % A) - (mul2_B % A)) % A;
+
+        // Shift by 2^i
+        uint64_t power_of_2 = 1ULL << i;
+        Value *shifted_enc = Bld.CreateMul(bit_xor_enc, ConstantInt::get(bit_xor_enc->getType(), power_of_2), "shifted_enc");
+        uint64_t shifted_B = (bit_xor_B * power_of_2) % A;
+
+        // Accumulate
+        Value *final_enc_ext = Bld.CreateZExtOrTrunc(final_enc, shifted_enc->getType());
+        final_enc = Bld.CreateAdd(final_enc_ext, shifted_enc, "final_enc");
+        final_B = (final_B + shifted_B) % A;
+    }
+
+    return ANBValue{final_enc, final_B};
+}
 
 //Returns true when the instruction is a RACFED injected one
 bool ANBPass::isRACFEDInstruction(Instruction *I,
@@ -212,6 +258,15 @@ void ANBPass::checkOnReturn(BasicBlock &BB,
  */
 bool ANBPass::hasANBInstructions(BasicBlock &BB,
                                  GlobalVariable *RuntimeSig) const {
+    // Check for real function calls
+    for (Instruction &I : BB) {
+        if (auto *CI = dyn_cast<CallInst>(&I)) {
+            if (!isa<IntrinsicInst>(CI) && !CI->isInlineAsm())
+                return false;
+        }
+    }
+
+    bool hasProtectable = false;
     for (Instruction &I : BB) {
         if (isa<PHINode>(&I))           continue;
         if (I.isTerminator())           continue;
@@ -220,17 +275,28 @@ bool ANBPass::hasANBInstructions(BasicBlock &BB,
         if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
             if ((BO->getOpcode() == Instruction::Add ||
                  BO->getOpcode() == Instruction::Sub ||
-                 BO->getOpcode() == Instruction::Mul) &&
+                 BO->getOpcode() == Instruction::Mul ||
+                 BO->getOpcode() == Instruction::Xor ||
+                 BO->getOpcode() == Instruction::And ||
+                 BO->getOpcode() == Instruction::Or) &&
                 BO->getType()->isIntegerTy())
-                return true;
+                hasProtectable = true;
         }
         if (auto *CI = dyn_cast<ICmpInst>(&I)) {
             if (CI->getPredicate() == ICmpInst::ICMP_EQ &&
                 CI->getOperand(0)->getType()->isIntegerTy())
-                return true;
+                hasProtectable = true;
+        }
+        if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            if (LI->getType()->isIntegerTy() && LI->getPointerOperand() != RuntimeSig)
+                hasProtectable = true;
+        }
+        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+            if (SI->getValueOperand()->getType()->isIntegerTy() && SI->getPointerOperand() != RuntimeSig)
+                hasProtectable = true;
         }
     }
-    return false;
+    return hasProtectable;
 }
 
 void ANBPass::createSignature(Function &F) {
@@ -281,6 +347,9 @@ void ANBPass::checkJumpSig(BasicBlock &BB,
 
     Value *diff = B.CreateSub(cur, prev, "anb.sig_diff");
     Value *expected = ConstantInt::get(I64, expectedDiff);
+    
+    printSig(*BB.getModule(), B, diff, "checkJumpSig - actual diff");
+    printSig(*BB.getModule(), B, expected, "checkJumpSig - expectedDiff");
     
     Value *err = B.CreateSub(diff, expected, "anb.sig_err");
     Value *isErr = B.CreateICmpNE(err, ConstantInt::get(I64, 0), "anb.has_err");
@@ -558,6 +627,14 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 printSig(Md, BEntry, sigVal, "Entry BB Init Signature");
             }
 
+            if (!bbHasANB) {
+                // Se il blocco non è protetto (es. contiene CallInst), 
+                // non lo strumentiamo, ma DOBBIAMO salvare lo snapshot alla fine 
+                // per dare un punto di partenza valido al blocco successivo!
+                saveSnapshot(BB, RuntimeSig, PrevSig);
+                continue;
+            }
+
             //  Collect original instructions ─────────────────────────────
             SmallVector<Instruction *, 16> origInstrs;
             for (Instruction &I : BB) {
@@ -568,10 +645,75 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 origInstrs.push_back(&I);
             }
 
-            //  ANB-encode each protectable instruction ───────────────────
+            //  ANB-encode each protectable instruction
             uint64_t expectedDiff = 0;
             for (Instruction *I : origInstrs) {
                 auto *BO = dyn_cast<BinaryOperator>(I);
+
+                //Protezione delle load
+                if (auto *LI = dyn_cast<LoadInst>(I)) {
+                    if (LI->getPointerOperand() != RuntimeSig && LI->getPointerOperand() != PrevSig && LI->getType()->isIntegerTy()) {
+                        Instruction *insertPt = I->getNextNode();
+                        if (insertPt) {
+                            expectedDiff++;
+                            IRBuilder<> B(insertPt);
+                            LoadInst *clonedLoad = cast<LoadInst>(LI->clone());
+                            LI->setVolatile(true);
+                            clonedLoad->setVolatile(true);
+                            clonedLoad->insertInto(I->getParent(), insertPt->getIterator());
+                            Value *cmp = B.CreateICmpEQ(LI, clonedLoad, "anb.load_clone");
+                            Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_load_clone");
+                            Value *sig = B.CreateLoad(B.getInt64Ty(), RuntimeSig, "anb_load_clone_sig");
+                            Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
+                            B.CreateStore(newSig, RuntimeSig);
+                        }
+                    }
+                }
+                //protezione store
+                if (auto *SI = dyn_cast<StoreInst>(I)) {
+                    Value *valStored = SI->getValueOperand();
+                    if (SI->getPointerOperand() != RuntimeSig && SI->getPointerOperand() != PrevSig && valStored->getType()->isIntegerTy()) {
+                        Instruction *insertPt = I->getNextNode();
+                        if (insertPt) {
+                            expectedDiff++;
+                            IRBuilder<> B(insertPt);
+
+                            Value *ptr = SI->getPointerOperand();
+                            SI->setVolatile(true);
+                            LoadInst *readStore = B.CreateLoad(valStored->getType(), ptr, "anb.store_clone");
+                            readStore->setVolatile(true);
+                            Value *cmp = B.CreateICmpEQ(valStored, readStore, "anb.store_clone_cmp");
+                            Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_store_clone_inc");
+                            Value *sig = B.CreateLoad(B.getInt64Ty(), RuntimeSig, "anb.sig_store");
+                            Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
+                            B.CreateStore(newSig, RuntimeSig);
+                        }
+                    }
+                }
+                
+                //------------Protezione Operazioni Booleane (XOR, AND, OR) via SEDDI-in-ANB---------------------//
+                if (BO && (BO->getOpcode() == Instruction::Xor ||
+                           BO->getOpcode() == Instruction::And ||
+                           BO->getOpcode() == Instruction::Or) &&
+                    BO->getType()->isIntegerTy()) {
+                    Instruction *insertPt = I->getNextNode();
+                    if (!insertPt) continue;
+                    expectedDiff++;
+                    IRBuilder<> B(insertPt);
+
+                    // Cloniamo l'istruzione booleana
+                    Instruction *clonedOp = BO->clone();
+                    clonedOp->insertInto(I->getParent(), insertPt->getIterator());
+                    
+                    // Confrontiamo originale e clone
+                    Value *cmp = B.CreateICmpEQ(BO, clonedOp, "anb.bitwise_clone_cmp");
+                    Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_bitwise_inc");
+                    Value *sig = B.CreateLoad(B.getInt64Ty(), RuntimeSig, "anb.sig_bitwise");
+                    Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
+                    B.CreateStore(newSig, RuntimeSig);
+                    continue;
+                }
+
                 if (BO && BO->getOpcode() == Instruction::Add &&
                     BO->getType()->isIntegerTy()) {  // i32 e i64
                     Instruction *insertPt = I->getNextNode();
@@ -614,6 +756,14 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     IRBuilder<> B(insertPt);
                     uint64_t Ba = biasDist(rng);
                     uint64_t Bb = biasDist(rng);
+                    
+                    // ANTI-UNDERFLOW FIX:
+                    // If a == b (e.g. i == Nk in first iteration), z_enc = Ba - Bb.
+                    // If Ba < Bb, z_enc becomes negative, wrapping around in 64-bit unsigned.
+                    // The URem modulo A then yields garbage, failing the signature check!
+                    // By ensuring Ba >= Bb, we guarantee z_enc >= 0 when a >= b.
+                    if (Ba < Bb) std::swap(Ba, Bb);
+
 
                     Value *op0 = BO->getOperand(0);
                     Value *op1 = BO->getOperand(1);

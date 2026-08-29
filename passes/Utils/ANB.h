@@ -20,6 +20,7 @@ static constexpr uint64_t ANB_DEFAULT_A = 58321ULL;
 struct ANBValue {
     Value    *encoded; ///< IR value representing (real_value + B) in i128
     uint64_t  B;       ///< compile-time bias
+    ANBValue &operator=(uint64_t uint64);
 };
 
 /**
@@ -86,6 +87,14 @@ ANBValue createANBMul(IRBuilder<> &Bld,
  * Emits IR that computes the ANB-encoded subtraction of two values.
  */
 ANBValue createANBSub(IRBuilder<> &Bld,
+                      Value *a, uint64_t Ba,
+                      Value *b, uint64_t Bb,
+                      uint64_t A = ANB_DEFAULT_A);
+
+/**
+ * Emits IR that computes the ANB-encoded XOR of two values using bitwise decomposition.
+ */
+ANBValue createANBXOR(IRBuilder<> &Bld,
                       Value *a, uint64_t Ba,
                       Value *b, uint64_t Bb,
                       uint64_t A = ANB_DEFAULT_A);
