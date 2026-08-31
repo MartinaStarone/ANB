@@ -1,0 +1,63 @@
+
+Merging object attributes
+
+
+There are no discarded input sections
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+SRAM             0x00000000         0x00000100         xr
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+                0x00000000                        . = ORIGIN (SRAM)
+
+.text           0x00000000       0xa0
+                0x00000000                        _start = .
+ *(.entry)
+ *(.text)
+ .text          0x00000000       0xa0 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+                0x00000000                _stage2_boot
+                0x00000092                read_flash_sreg
+LOAD CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+LOAD /home/martina/pico-tools/riscv-toolchain/bin/../lib/gcc/riscv32-unknown-elf/15.2.0/rv32imac_zicsr_zifencei_zaamo_zalrsc_zba_zbb_zbkb_zbs/ilp32/libgcc.a
+START GROUP
+LOAD /home/martina/pico-tools/riscv-toolchain/bin/../lib/gcc/riscv32-unknown-elf/15.2.0/../../../../riscv32-unknown-elf/lib/rv32imac_zicsr_zifencei_zaamo_zalrsc_zba_zbb_zbkb_zbs/ilp32/libc.a
+LOAD /home/martina/pico-tools/riscv-toolchain/bin/../lib/gcc/riscv32-unknown-elf/15.2.0/../../../../riscv32-unknown-elf/lib/rv32imac_zicsr_zifencei_zaamo_zalrsc_zba_zbb_zbkb_zbs/ilp32/libgloss.a
+END GROUP
+LOAD /home/martina/pico-tools/riscv-toolchain/bin/../lib/gcc/riscv32-unknown-elf/15.2.0/rv32imac_zicsr_zifencei_zaamo_zalrsc_zba_zbb_zbkb_zbs/ilp32/libgcc.a
+OUTPUT(bs2_default.elf elf32-littleriscv)
+
+.data           0x000000a0        0x0
+ .data          0x000000a0        0x0 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.bss            0x000000a0        0x0
+ .bss           0x000000a0        0x0 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.riscv.attributes
+                0x00000000       0x83
+ .riscv.attributes
+                0x00000000       0x83 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.debug_line     0x00000000      0x1cd
+ .debug_line    0x00000000      0x1cd CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.debug_line_str
+                0x00000000      0x125
+ .debug_line_str
+                0x00000000      0x125 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.debug_info     0x00000000       0x25
+ .debug_info    0x00000000       0x25 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.debug_abbrev   0x00000000       0x14
+ .debug_abbrev  0x00000000       0x14 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.debug_aranges  0x00000000       0x20
+ .debug_aranges
+                0x00000000       0x20 CMakeFiles/bs2_default.dir/compile_time_choice.S.o
+
+.debug_str      0x00000000       0xaf
+ .debug_str     0x00000000       0xaf CMakeFiles/bs2_default.dir/compile_time_choice.S.o
