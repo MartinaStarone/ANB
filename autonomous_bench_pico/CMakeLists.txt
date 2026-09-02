@@ -17,7 +17,8 @@ set(RISCV_SYSROOT "/home/martina/pico-tools/riscv-toolchain/riscv32-unknown-elf"
 set(RP2350_RISCV_ARCH "rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb" CACHE STRING "")
 set(RP2350_RISCV_ABI "ilp32" CACHE STRING "")
 
-set(APP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/multiple_functions.c")
+set(APP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/aes.c")
+
 
 set(HARDENED_LL "hardened.ll")
 set(HARDENED_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/hardened.o")
