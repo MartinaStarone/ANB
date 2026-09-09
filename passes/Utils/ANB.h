@@ -15,6 +15,26 @@ namespace llvm {
 /// Default ANB modulus (prime number).
 static constexpr uint64_t ANB_DEFAULT_A = 58321ULL;
 
+/// Compute the modular inverse of a modulo 2^64 at compile time.
+/// Uses Hensel's lemma: each iteration x *= (2 - a*x) doubles the
+/// number of correct bits: 1 → 2 → 4 → 8 → 16 → 32 → 64 bits.
+/// Requires a to be odd (guaranteed for ANB_DEFAULT_A = 58321).
+static constexpr uint64_t modInverse64(uint64_t a) {
+    uint64_t x = 1;     // a*1 ≡ 1 (mod 2) for any odd a
+    x *= 2 - a * x;     // mod 2^2
+    x *= 2 - a * x;     // mod 2^4
+    x *= 2 - a * x;     // mod 2^8
+    x *= 2 - a * x;     // mod 2^16
+    x *= 2 - a * x;     // mod 2^32
+    x *= 2 - a * x;     // mod 2^64
+    return x;
+}
+
+/// Modular inverse of ANB_DEFAULT_A mod 2^64, computed at compile time.
+/// Replaces udiv by A in createANBMul with a single MUL instruction,
+/// avoiding any dependency on __udivdi3 / __udivti3 on RV32 bare-metal.
+static constexpr uint64_t ANB_A_INV = modInverse64(ANB_DEFAULT_A);
+
 /// Holds an ANB-encoded value together with its bias B.
 /// The invariant is: encoded ≡ real_value + B  (mod A)
 struct ANBValue {

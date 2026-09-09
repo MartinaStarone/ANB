@@ -118,23 +118,33 @@ ANBValue llvm::createANBMul(IRBuilder<> &Bld, Value *a, uint64_t Ba,
     //   a_enc * b_enc = a*b*A^2 + (a*Bb + b*Ba)*A + Ba*Bb
     Value *result = Bld.CreateMul(a_enc, b_enc, "anb.prod");
 
-    //first value A*a*Bb
-    Value *first = Bld.CreateMul(a_enc,A64);
-    first = Bld.CreateMul(first, ConstantInt::get(I64,(Bb)), "anb.first");
+    //   cross = a*Bb + b*Ba  (compile-time Bb, Ba are biases)
+    Value *cross = Bld.CreateAdd(
+        Bld.CreateMul(a64, ConstantInt::get(I64, Bb), "anb.a_Bb"),
+        Bld.CreateMul(b64, ConstantInt::get(I64, Ba), "anb.b_Ba"),
+        "anb.cross");
+    //   result = a*b*A^2 + Ba*Bb
+    result = Bld.CreateSub(result,
+                            Bld.CreateMul(A64, cross, "anb.A_cross"),
+                            "anb.no_cross");
 
-    Value *second = Bld.CreateMul(b_enc,ConstantInt::get(I64,Ba), "anb.second");
 
-    Value *tmp = Bld.CreateAdd(first, second, "anb.prod");
-    //result = A^2*a*b + Ba*Bb
-    result = Bld.CreateSub(result,tmp, "anb.intermediate1");
-
-    //create A-1 and BaBb
-    uint64_t tmp2 = (A-1) * Ba * Bb;
-
-    result = Bld.CreateAdd(result,ConstantInt::get(I64,tmp2),"anb_corrected");
     //   result = a*b*A^2 + A*Ba*Bb
-    // (A-1)*Ba*Bb is a compile-time constant; max ~2^47.5 for A=58321, safe.
-    result = Bld.CreateUDiv(result, A64,"anb.finalres");
+    // Max value ≈ 2^48.6 for AES operands ≤255 — fits safely in i64.
+    uint64_t BaBb_corr = (A - 1) * Ba * Bb;
+    result = Bld.CreateAdd(result,
+                            ConstantInt::get(I64, BaBb_corr),
+                            "anb.corrected");
+
+    // Instead of UDiv (which on RV32 bare-metal calls __udivdi3 / __udivti3),
+    // we multiply by the modular inverse of A mod 2^64, computed at
+    // compile-time via Hensel lifting (see modInverse64 above).
+    //
+    // Correctness: since result = A*q (exactly) and q < 2^64,
+    //   (A*q mod 2^64) * A_inv mod 2^64 = q   [by definition of mod. inverse]
+    // which gives the correct quotient without any division instruction.
+    Value *AInv64 = ConstantInt::get(I64, ANB_A_INV);
+    result = Bld.CreateMul(result, AInv64, "anb.finalres");
 
     uint64_t Bz = (Ba * Bb) % A;
     return ANBValue{result, Bz};
