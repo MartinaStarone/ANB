@@ -126,7 +126,7 @@ ANBValue llvm::createANBMul(IRBuilder<> &Bld, Value *a, uint64_t Ba,
 
     Value *tmp = Bld.CreateAdd(first, second, "anb.prod");
     //result = A^2*a*b + Ba*Bb
-    result = Bld.CreateSub(result,tmp, "anb.intermediate1";
+    result = Bld.CreateSub(result,tmp, "anb.intermediate1");
 
     //create A-1 and BaBb
     uint64_t tmp2 = (A-1) * Ba * Bb;
