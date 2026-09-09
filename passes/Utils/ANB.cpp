@@ -96,38 +96,48 @@ ANBValue llvm::createANBSub(IRBuilder<> &Bld,
 }
 
 
-ANBValue llvm::createANBMul(IRBuilder<> &Bld,Value *a, uint64_t Ba,
+ANBValue llvm::createANBMul(IRBuilder<> &Bld, Value *a, uint64_t Ba,
                             Value *b, uint64_t Bb,
-                            uint64_t A ) {
+                            uint64_t A) {
 
     LLVMContext &Ctx = Bld.getContext();
-    Type *I128 = Type::getInt64Ty(Ctx);
-    Value *A128 = ConstantInt::get(I128, A);
+    Type *I64 = Type::getInt64Ty(Ctx);
+    Value *A64 = ConstantInt::get(I64, A);
 
-    Value *a128 = Bld.CreateZExt(a, I128, "anb.a128");
-    Value *b128 = Bld.CreateZExt(b, I128, "anb.b128");
+    // Extend original operands to 64-bit. Required both for encoding and for
+    // the cross-term correction below.
+    Value *a64 = Bld.CreateZExt(a, I64, "anb.a64");
+    Value *b64 = Bld.CreateZExt(b, I64, "anb.b64");
 
-    // a_enc = a * A + Ba
-    Value *a_mul = Bld.CreateMul(a128, A128, "anb.a_mul");
-    Value *a_enc = Bld.CreateAdd(a_mul, ConstantInt::get(I128, Ba), "anb.a_enc");
-    // b_enc = b * A + Bb
-    Value *b_mul = Bld.CreateMul(b128, A128, "anb.b_mul");
-    Value *b_enc = Bld.CreateAdd(b_mul, ConstantInt::get(I128, Bb), "anb.b_enc");
+    // Encode: a_enc = a*A + Ba,  b_enc = b*A + Bb
+    Value *a_enc = Bld.CreateAdd(Bld.CreateMul(a64, A64, "anb.a_mul"),
+                                  ConstantInt::get(I64, Ba), "anb.a_enc");
+    Value *b_enc = Bld.CreateAdd(Bld.CreateMul(b64, A64, "anb.b_mul"),
+                                  ConstantInt::get(I64, Bb), "anb.b_enc");
 
-    Value *result = Bld.CreateMul(a_enc, b_enc, "anb_res");
+    //   a_enc * b_enc = a*b*A^2 + (a*Bb + b*Ba)*A + Ba*Bb
+    Value *result = Bld.CreateMul(a_enc, b_enc, "anb.prod");
 
-    Value *div_res = Bld.CreateUDiv(result, A128, "anb.div");
-    Value *mod_res = Bld.CreateURem(div_res, A128, "anb.mod");
-    Value *tmp1 = Bld.CreateMul(mod_res, A128, "tmp");
+    //first value A*a*Bb
+    Value *first = Bld.CreateMul(a_enc,A64);
+    first = Bld.CreateMul(first, ConstantInt::get(I64,(Bb)), "anb.first");
 
-    Value *tmp2 = Bld.CreateURem(result, A128, "anb.tmp2");
-    Value *res = Bld.CreateSub(result, tmp1, "middle");
-    Value *res2 = Bld.CreateUDiv(res, A128, "middle2");
-    Value *res_f = Bld.CreateAdd(res2, tmp2, "result");
+    Value *second = Bld.CreateMul(b_enc,ConstantInt::get(I64,Ba), "anb.second");
 
-    uint64_t Bz = (Ba*Bb) % A;
-    return ANBValue{res_f, Bz};
+    Value *tmp = Bld.CreateAdd(first, second, "anb.prod");
+    //result = A^2*a*b + Ba*Bb
+    result = Bld.CreateSub(result,tmp, "anb.intermediate1";
 
+    //create A-1 and BaBb
+    uint64_t tmp2 = (A-1) * Ba * Bb;
+
+    result = Bld.CreateAdd(result,ConstantInt::get(I64,tmp2),"anb_corrected");
+    //   result = a*b*A^2 + A*Ba*Bb
+    // (A-1)*Ba*Bb is a compile-time constant; max ~2^47.5 for A=58321, safe.
+    result = Bld.CreateUDiv(result, A64,"anb.finalres");
+
+    uint64_t Bz = (Ba * Bb) % A;
+    return ANBValue{result, Bz};
 }
 
 Value *llvm::createANBSetEq(IRBuilder<> &B, Value *a, uint64_t Ba, Value *b, uint64_t Bb, uint64_t A) {
@@ -516,7 +526,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
             "runtime_sig");
     }
 
-    // ── Create (or retrieve) anb_prev_sig global ──────────────────────────
+    // Create (or retrieve) anb_prev_sig global
     GlobalVariable *PrevSig = Md.getGlobalVariable("anb_prev_sig");
     if (!PrevSig) {
         PrevSig = new GlobalVariable(
@@ -635,7 +645,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 continue;
             }
 
-            //  Collect original instructions ─────────────────────────────
+            //  Collect original instructions
             SmallVector<Instruction *, 16> origInstrs;
             for (Instruction &I : BB) {
                 if (isa<PHINode>(&I))           continue;
