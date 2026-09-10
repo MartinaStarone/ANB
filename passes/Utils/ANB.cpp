@@ -338,7 +338,7 @@ void ANBPass::createSignature(Function &F) {
  * snapshot saved at the start of the previous BB.
  * The idea: each ANB check adds +1 to runtime_sig when the
  * instruction executed correctly.  If the +1 was skipped,
- * runtime_sig == anb_prev_sig  →  diff == 0  →  udiv 1/0  →  SIGFPE.
+ * runtime_sig == anb_prev_sig  ->  diff == 0  -> udiv 1/0  -> SIGFPE.
  */
 void ANBPass::checkJumpSig(BasicBlock &BB,
                            GlobalVariable *RuntimeSig,
@@ -416,7 +416,7 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
         // No user annotation: ask SCEV for the max back-edge taken count
         const SCEV *MaxBTC = SE.getConstantMaxBackedgeTakenCount(L);
         if (const auto *C = dyn_cast<SCEVConstant>(MaxBTC)) {
-            maxBound = C->getValue()->getZExtValue() + 1;  // +1: back-edge count → iteration count
+            maxBound = C->getValue()->getZExtValue() + 1;  // +1: back-edge count -> iteration count
             errs() << "[ANB] SCEV max bound for loop: " << maxBound << " iterations\n";
         } else {
             //TODO: controlla se funziona
