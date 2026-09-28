@@ -278,13 +278,15 @@ void ANBPass::checkOnReturn(BasicBlock &BB,
  */
 bool ANBPass::hasANBInstructions(BasicBlock &BB,
                                  GlobalVariable *RuntimeSig) const {
-    // Check for real function calls
+    // Rimuoviamo il check sulle call per poterle proteggere tramite backup/restore
+    /*
     for (Instruction &I : BB) {
         if (auto *CI = dyn_cast<CallInst>(&I)) {
             if (!isa<IntrinsicInst>(CI) && !CI->isInlineAsm())
                 return false;
         }
     }
+    */
 
     bool hasProtectable = false;
     for (Instruction &I : BB) {
@@ -308,11 +310,11 @@ bool ANBPass::hasANBInstructions(BasicBlock &BB,
                 hasProtectable = true;
         }
         if (auto *LI = dyn_cast<LoadInst>(&I)) {
-            if (LI->getType()->isIntegerTy() && LI->getPointerOperand() != RuntimeSig)
+            if (LI->getType()->isIntegerTy() || LI->getType()->isPointerTy() && LI->getPointerOperand() != RuntimeSig)
                 hasProtectable = true;
         }
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
-            if (SI->getValueOperand()->getType()->isIntegerTy() && SI->getPointerOperand() != RuntimeSig)
+            if (SI->getValueOperand()->getType()->isIntegerTy() || SI->getValueOperand()->getType()->isPointerTy() && SI->getPointerOperand() != RuntimeSig)
                 hasProtectable = true;
         }
     }
@@ -672,7 +674,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
 
                 //Protezione delle load
                 if (auto *LI = dyn_cast<LoadInst>(I)) {
-                    if (LI->getPointerOperand() != RuntimeSig && LI->getPointerOperand() != PrevSig && LI->getType()->isIntegerTy()) {
+                    if (LI->getPointerOperand() != RuntimeSig && LI->getPointerOperand() != PrevSig && LI->getType()->isIntegerTy() || LI->getType()->isPointerTy()) {
                         Instruction *insertPt = I->getNextNode();
                         if (insertPt) {
                             expectedDiff++;
@@ -684,8 +686,10 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                             Value *cmp = B.CreateICmpEQ(LI, clonedLoad, "anb.load_clone");
                             Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_load_clone");
                             Value *sig = B.CreateLoad(B.getInt64Ty(), RuntimeSig, "anb_load_clone_sig");
+                            printSig(Md, B, sig, "Before Load Instr - runtime_sig");
                             Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
                             B.CreateStore(newSig, RuntimeSig);
+                            printSig(Md, B, newSig, "After Load Instr - runtime_sig");
                         }
                     }
                 }
@@ -705,8 +709,10 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                             Value *cmp = B.CreateICmpEQ(valStored, readStore, "anb.store_clone_cmp");
                             Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_store_clone_inc");
                             Value *sig = B.CreateLoad(B.getInt64Ty(), RuntimeSig, "anb.sig_store");
+                            printSig(Md, B, sig, "Before Store Instr - runtime_sig");
                             Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
                             B.CreateStore(newSig, RuntimeSig);
+                            printSig(Md, B, newSig, "After Store Instr - runtime_sig");
                         }
                     }
                 }
@@ -729,8 +735,10 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     Value *cmp = B.CreateICmpEQ(BO, clonedOp, "anb.bitwise_clone_cmp");
                     Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_bitwise_inc");
                     Value *sig = B.CreateLoad(B.getInt64Ty(), RuntimeSig, "anb.sig_bitwise");
+                    printSig(Md, B, sig, "Before Bitwise Instr - runtime_sig");
                     Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
                     B.CreateStore(newSig, RuntimeSig);
+                    printSig(Md, B, newSig, "After Bitwise Instr - runtime_sig");
                     continue;
                 }
 
@@ -868,8 +876,25 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
 
                     Value *newSig = B.CreateAdd(sig, increment_i64, "anb.sig_upd");
                     B.CreateStore(newSig, RuntimeSig);
-                    printSig(Md, B, newSig, "After Add Instr - runtime_sig");
+                    printSig(Md, B, newSig, "After Mul Instr - runtime_sig");
                     continue;
+                }
+
+                // Protezione (Backup/Restore) attorno alle chiamate a funzione
+                if (auto *CI = dyn_cast<CallInst>(I)) {
+                    if (!isa<IntrinsicInst>(CI) && !CI->isInlineAsm()) {
+                        Instruction *insertPt = CI->getNextNode();
+                        if (insertPt) {
+                            IRBuilder<> BBefore(CI);
+                            Type *I64 = BBefore.getInt64Ty();
+                            Value *sigBackup = BBefore.CreateLoad(I64, RuntimeSig, "anb.sig_backup");
+                            Value *prevBackup = BBefore.CreateLoad(I64, PrevSig, "anb.prev_backup");
+                            
+                            IRBuilder<> BAfter(insertPt);
+                            BAfter.CreateStore(sigBackup, RuntimeSig);
+                            BAfter.CreateStore(prevBackup, PrevSig);
+                        }
+                    }
                 }
 
             } // for each original instruction

@@ -143,8 +143,7 @@ static uint8_t getSBoxValue(uint8_t num)
 #define getSBoxValue(num) (sbox[(num)])
 
 // This function produces Nb(Nr+1) round keys. The round keys are used in each round to decrypt the states. 
-/* KeyExpansion: due loop top-level sequenziali con trip count diversi (4 e 40).
- * ANB non supporta annotazione singola per funzioni multi-loop: si affida a checkJumpSig. */
+/* */
 static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
 {
   unsigned i, j, k;

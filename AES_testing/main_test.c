@@ -1,3 +1,4 @@
+#include <unistd.h>
 /* ECB-only test per validazione ANB.
  * CBC e CTR disabilitati: evita SIGFPE spurio di ANB su AES_init_ctx_iv.
  * Test con NIST FIPS-197 Appendix B vector (AES-128 ECB). */
@@ -35,6 +36,7 @@ static void phex(const char *label, const uint8_t *buf, int len)
 
 int main(void)
 {
+    alarm(1);
     printf("\n=== ANB + AES-128 ECB test ===\n\n");
 
     uint8_t buf[16];
