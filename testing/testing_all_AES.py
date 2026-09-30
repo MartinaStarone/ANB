@@ -74,6 +74,13 @@ class ComandoTestAll(gdb.Command):
                     if "[FAIL]" in output:
                         print(f"Indirizzo {hex(addr)}: SILENT ERROR (Cifratura sbagliata!)")
                         silent_errors += 1
+                        sal = gdb.find_pc_line(addr)
+                        linea_c = f"{sal.symtab.filename}:{sal.line}" if sal.symtab else "Sconosciuta"
+                        arch = gdb.selected_inferior().architecture()
+                        istr_asm = arch.disassemble(addr,count=1)[0]['asm']
+
+                        with open("analisi_silent.txt", "a") as log_file:
+                            log_file.write(f"ADDR: {hex(addr)} | C_LINE: {linea_c} | ASM: {istr_asm}\n")
                     elif "[OK]" in output:
                         print(f"Indirizzo {hex(addr)}: BENIGN (Sopravvissuto e Cifratura Corretta)")
                         benign_faults += 1
