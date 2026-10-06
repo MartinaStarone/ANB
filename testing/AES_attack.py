@@ -1,0 +1,111 @@
+import sys
+
+import re
+import gdb
+
+class ComandoTestAll(gdb.Command):
+    def __init__(self):
+        super().__init__("avvia_test_all", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        gdb.execute("set confirm off")
+        gdb.execute("set pagination off")
+
+        funzioni_aes = ['Cipher', 'AddRoundKey', 'SubBytes', 'MixColumns', 'ShiftRows', 'KeyExpansion']
+        indirizzi = []
+
+        SkipbreakPoint("aes.c:198", 32)
+
+        gdb.execute(f"run > /tmp/anb_test_out.txt 2>&1", to_string=True)
+
+
+        inf = gdb.selected_inferior()
+
+        rilevati_anb = 0
+        rilevati_os = 0
+        silent_errors = 0
+        benign_faults = 0
+        addr= "aes.c:198"
+        if inf.pid > 0:
+            # Program crashed (received a signal like SIGSEGV, SIGABRT, SIGILL)
+            try:
+                # Check if this was ANB's branchless memory trap (which loads from 0xffffffffffffffff / -1)
+                fault_addr = int(gdb.parse_and_eval("$_siginfo._sifields._sigfault.si_addr"))
+                # In 64-bit, -1 is 0xffffffffffffffff
+                is_anb_trap = (fault_addr == -1 or fault_addr == 0xffffffffffffffff)
+            except:
+                is_anb_trap = False
+
+            gdb.execute("kill", to_string=True)
+
+            if is_anb_trap:
+                print(f" RILEVATO (ANB Memory Trap)")
+                rilevati_anb += 1
+            else:
+                print(f" RILEVATO (Crash/Segnale OS)")
+                rilevati_os += 1
+        else:
+            # Program exited normally
+            try:
+                with open("/tmp/anb_test_out.txt", "r", errors="ignore") as f:
+                    output = f.read()
+            except:
+                output = ""
+
+            if "[FAIL]" in output:
+                print(f"Indirizzo: SILENT ERROR (Cifratura sbagliata!)")
+                silent_errors += 1
+
+                stringa_letta= ""
+                match = re.search(r'Ciphertext:\s*([0-9a-fA-F]{32})', output)
+                if match:
+                    stringa_letta = match.group(1)
+                else:
+                    stringa_letta = "Errore_lettura_output"
+
+                with open("ciphertexts","a") as ciph_file:
+                    ciph_file.write(f"ADDR: {addr}| Ciphertext wrong: {stringa_letta}")
+            elif "[OK]" in output:
+                print(f"Indirizzo {addr}: BENIGN (Sopravvissuto e Cifratura Corretta)")
+                with open("ciphertexts","a") as ciph_file:
+                    stringa_letta= ""
+                    match = re.search(r'Ciphertext:\s*([0-9a-fA-F]{32})', output)
+                    if match:
+                        stringa_letta = match.group(1)
+                    else:
+                        stringa_letta = "Errore_lettura_output"
+                    ciph_file.write(f"ADDR: {addr}| Ciphertext corretto: {stringa_letta}")
+                benign_faults += 1
+            else:
+                # Fallback if output doesn't match expected strings
+                print(f"Indirizzo {addr}: SILENT ERROR (Output inaspettato)")
+                stringa_letta= ""
+                match = re.search(r'Ciphertext:\s*([0-9a-fA-F]{32})', output)
+                if match:
+                    stringa_letta = match.group(1)
+                else:
+                    stringa_letta = "Errore_lettura_output"
+                with open("ciphertexts","a") as ciph_file:
+                    ciph_file.write(f"ADDR: {addr}| Ciphertext wrong: {stringa_letta}")
+                silent_errors += 1
+
+
+
+class SkipbreakPoint(gdb.Breakpoint):
+    def __init__(self, addr,target_i):
+        super().__init__(addr, gdb.BP_BREAKPOINT, internal=True)
+        self.target_i = target_i
+    def stop(self):
+
+        val_i = int(gdb.parse_and_eval("i"))
+        if val_i ==  self.target_i:
+            arch = gdb.newest_frame().architecture()
+            pc = int(gdb.parse_and_eval("$pc"))
+            istruzione = arch.disassemble(pc, pc + 15)[0]
+            lunghezza = istruzione['length']
+            gdb.execute(f"set $pc = $pc + {lunghezza}", to_string=True)
+            print(f"Istruzione saltata con successo quando i={val_i}!")
+
+        return False
+
+ComandoTestAll()

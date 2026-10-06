@@ -143,8 +143,7 @@ static uint8_t getSBoxValue(uint8_t num)
 #define getSBoxValue(num) (sbox[(num)])
 
 // This function produces Nb(Nr+1) round keys. The round keys are used in each round to decrypt the states.
-/* KeyExpansion: due loop top-level sequenziali con trip count diversi (4 e 40).
- * ANB non supporta annotazione singola per funzioni multi-loop: si affida a checkJumpSig. */
+
 static void KeyExpansion(uint8_t* RoundKey, const uint8_t* Key)
 {
   unsigned i, j, k;
@@ -585,31 +584,57 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 #include "pico/stdlib.h"
 #include <stdio.h>
 
+volatile int test_status = 0;
+const uint8_t golden_out[] = { 0x3a, 0xd7, 0x7b, 0xb4, 0x0d, 0x7a, 0x36,
+  0x60, 0xa8, 0x9e, 0xca, 0xf3, 0x24, 0x66, 0xef, 0x97 };
+
+void __attribute__((noinline)) test_completed(void) {
+  while(1) { sleep_ms(100); }
+}
 void SigMismatch_Handler(void) {
-    printf("FAULT_DETECTED: SigMismatch\n");
-    while(1) { sleep_ms(100); }
+    test_status = 3;
+    //test_completed();
+
+
 }
 
 void DataCorruption_Handler(void) {
-    printf("FAULT_DETECTED: DataCorruption\n");
-    while(1) { sleep_ms(100); }
+  test_status = 3;
+  test_completed();
+
 }
 
 int main(void) {
+
   stdio_init_all();
-  sleep_ms(2000); // Aspetta che USB sia pronto
-  
+  sleep_ms(3000);
   uint8_t key[] = { 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c };
   uint8_t in[]  = { 0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a };
   struct AES_ctx ctx;
-  
   AES_init_ctx(&ctx, key);
+  uint64_t start_time = time_us_64();
+
+
   AES_ECB_encrypt(&ctx, in);
+
+
+  uint64_t end_time = time_us_64();
+
+  uint64_t elapsed_time = end_time - start_time;
+  printf("Tempo impiegato per 1000 cifrature: %llu microsecondi\n", elapsed_time);
+
   
-  // Se arriviamo qui senza crash, ANB ha validato tutto
-  printf("ANB: ALL CHECKS PASSED\n");
-  
-  // Terminazione sicura (con sleep per permettere a USB di inviare il printf)
-  while(1) { sleep_ms(100); }
+  if (memcmp(in, golden_out, 16) == 0) {
+    test_status = 1; // Benign Fault (Cifratura OK)
+  } else {
+    test_status = 2; // SDC! (Cifratura Corrotta)
+  }
+  test_completed();
+  printf("Tempo impiegato: %llu microsecondi\n", elapsed_time);
+
+
+  test_completed();
+
   return 0;
+
 }

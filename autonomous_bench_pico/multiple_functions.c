@@ -17,8 +17,8 @@ void DataCorruption_Handler(void) {
 }
 
 void SigMismatch_Handler(void) {
-    fprintf(stderr, "FAULT_DETECTED: SigMismatch\n");
-    exit(3);
+    //fprintf(stderr, "FAULT_DETECTED: SigMismatch\n");
+    //exit(3);
 }
 
 /* -------------------------------------------------------------------
@@ -42,8 +42,10 @@ void SigMismatch_Handler(void) {
 */
 
 
-int expo(int);
-
+__attribute__((always_inline)) inline int expo(int x) {
+    x = x * x;
+    return x;
+}
 __attribute__((annotate("trip_count_10")))
 int main(int argc, char **argv) {
     stdio_init_all(); // Required to initialize USB/UART for printf
@@ -68,13 +70,27 @@ int main(int argc, char **argv) {
     for(i = 0; i < 10; i++){
         printf("z[%d] = %d\n", i, z[i]);
     }
+    // 1. Aspetta che tu apra minicom
+    while(!stdio_usb_connected()){
+        sleep_ms(100);
+    }
 
+    // 2. STAMPA DI CONFERMA!
+    printf("\n=== PICO CONNESSA: Inizio elaborazione... ===\n");
+
+    // 3. Fai partire il cronometro
+    uint64_t start_time = time_us_64();
+
+
+    // Semplice benchmark: calcolo matematico ripetuto
+    volatile int somma = 0;
+    for(int i = 0; i < 1000; i++) {
+        somma += i;
+    }
+
+    uint64_t end_time = time_us_64();
+    printf("Tempo: %llu\n", end_time - start_time);
     return 0;
 }
 
-int expo(int x){
 
-    x = x * x;
-
-    return x;
-}

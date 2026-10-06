@@ -78,15 +78,24 @@ class ComandoTestAll(gdb.Command):
                         linea_c = f"{sal.symtab.filename}:{sal.line}" if sal.symtab else "Sconosciuta"
                         arch = gdb.selected_inferior().architecture()
                         istr_asm = arch.disassemble(addr,count=1)[0]['asm']
+                        stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
 
                         with open("analisi_silent.txt", "a") as log_file:
                             log_file.write(f"ADDR: {hex(addr)} | C_LINE: {linea_c} | ASM: {istr_asm}\n")
+
+                        with open("ciphertexts","c") as ciph_file:
+                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext wrong: {stringa_letta}")
                     elif "[OK]" in output:
                         print(f"Indirizzo {hex(addr)}: BENIGN (Sopravvissuto e Cifratura Corretta)")
+                        with open("ciphertexts","c") as ciph_file:
+                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext corretto: {stringa_letta}")
                         benign_faults += 1
                     else:
                         # Fallback if output doesn't match expected strings
                         print(f"Indirizzo {hex(addr)}: SILENT ERROR (Output inaspettato)")
+                        stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
+                        with open("ciphertexts","c") as ciph_file:
+                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext wrong: {stringa_letta}")
                         silent_errors += 1
                     
             except gdb.error as e:
