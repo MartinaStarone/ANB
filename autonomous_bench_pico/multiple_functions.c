@@ -49,6 +49,15 @@ __attribute__((always_inline)) inline int expo(int x) {
 __attribute__((annotate("trip_count_10")))
 int main(int argc, char **argv) {
     stdio_init_all(); // Required to initialize USB/UART for printf
+
+    // 1. Aspetta che la connessione USB sia disponibile (prima di qualsiasi printf)
+    while(!stdio_usb_connected()){
+        sleep_ms(100);
+    }
+
+    // 2. STAMPA DI CONFERMA!
+    printf("\n=== PICO CONNESSA: Inizio elaborazione... ===\n");
+
     int i = 0;
     int j = 2;
     int w = 3;
@@ -70,17 +79,9 @@ int main(int argc, char **argv) {
     for(i = 0; i < 10; i++){
         printf("z[%d] = %d\n", i, z[i]);
     }
-    // 1. Aspetta che tu apra minicom
-    while(!stdio_usb_connected()){
-        sleep_ms(100);
-    }
-
-    // 2. STAMPA DI CONFERMA!
-    printf("\n=== PICO CONNESSA: Inizio elaborazione... ===\n");
 
     // 3. Fai partire il cronometro
     uint64_t start_time = time_us_64();
-
 
     // Semplice benchmark: calcolo matematico ripetuto
     volatile int somma = 0;

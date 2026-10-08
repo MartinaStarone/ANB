@@ -78,24 +78,39 @@ class ComandoTestAll(gdb.Command):
                         linea_c = f"{sal.symtab.filename}:{sal.line}" if sal.symtab else "Sconosciuta"
                         arch = gdb.selected_inferior().architecture()
                         istr_asm = arch.disassemble(addr,count=1)[0]['asm']
-                        stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
+                        
+                        try:
+                            stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
+                        except:
+                            stringa_letta = "Errore di lettura"
 
                         with open("analisi_silent.txt", "a") as log_file:
                             log_file.write(f"ADDR: {hex(addr)} | C_LINE: {linea_c} | ASM: {istr_asm}\n")
 
-                        with open("ciphertexts","c") as ciph_file:
-                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext wrong: {stringa_letta}")
+                        with open("ciphertexts","a") as ciph_file:
+                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext wrong: {stringa_letta}\n")
                     elif "[OK]" in output:
                         print(f"Indirizzo {hex(addr)}: BENIGN (Sopravvissuto e Cifratura Corretta)")
-                        with open("ciphertexts","c") as ciph_file:
-                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext corretto: {stringa_letta}")
+                        
+                        try:
+                            stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
+                        except:
+                            stringa_letta = "Errore di lettura"
+                            
+                        with open("ciphertexts","a") as ciph_file:
+                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext corretto: {stringa_letta}\n")
                         benign_faults += 1
                     else:
                         # Fallback if output doesn't match expected strings
                         print(f"Indirizzo {hex(addr)}: SILENT ERROR (Output inaspettato)")
-                        stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
-                        with open("ciphertexts","c") as ciph_file:
-                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext wrong: {stringa_letta}")
+                        
+                        try:
+                            stringa_letta = gdb.parse_and_eval(f"(char *){hex(addr)}").string()
+                        except:
+                            stringa_letta = "Errore di lettura"
+                            
+                        with open("ciphertexts","a") as ciph_file:
+                            ciph_file.write(f"ADDR: {hex(addr)}| Ciphertext wrong: {stringa_letta}\n")
                         silent_errors += 1
                     
             except gdb.error as e:

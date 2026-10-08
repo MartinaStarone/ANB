@@ -139,12 +139,12 @@ private:
     /// Returns true if the instruction was injected by RACFED
     /// (loads/stores of runtime_sig, sig_add adds, etc.).
     bool isRACFEDInstruction(llvm::Instruction *I,
-                             llvm::GlobalVariable *RuntimeSig) const;
+                             llvm::Value *RuntimeSig) const;
 
     /// Returns true if the BB contains at least one ANB-protectable instruction
     /// (integer add or icmp eq).
     bool hasANBInstructions(llvm::BasicBlock &BB,
-                            llvm::GlobalVariable *RuntimeSig) const;
+                            llvm::Value *RuntimeSig) const;
 
     /// Creates a compile-time signature for the basic blocks.
     void createSignature(llvm::Function &F);
@@ -152,26 +152,25 @@ private:
     /// Inter-BB check: verifies runtime_sig was updated (+expectedDiff) in the BB.
     /// Uses branchless memory trap to crash (SIGSEGV) if diff != expectedDiff.
     void checkJumpSig(llvm::BasicBlock &BB,
-                      llvm::GlobalVariable *RuntimeSig,
-                      llvm::GlobalVariable *PrevSig,
+                      llvm::Value *RuntimeSig,
+                      llvm::Value *PrevSig,
                       uint64_t expectedDiff);
 
     void checkLoopCount(llvm::Loop *L, llvm::ScalarEvolution &SE, uint64_t expectedRounds,
-                        llvm::GlobalVariable *RuntimeSig,
-                        llvm::GlobalVariable *PrevSig, llvm::Module &Md);
+                        llvm::Value *RuntimeSig, llvm::Module &Md);
 
-    void saveSnapshot(llvm::BasicBlock &BB, llvm::GlobalVariable *RuntimeSig, llvm::GlobalVariable *PrevSig);
+    void saveSnapshot(llvm::BasicBlock &BB, llvm::Value *RuntimeSig, llvm::Value *PrevSig);
 
     llvm::Value *checkSig(llvm::Module &Md, llvm::ANBValue av, llvm::IRBuilder<> &B);
     void checkOnReturn(llvm::BasicBlock &BB,
-                       llvm::GlobalVariable *RuntimeSig,
-                       llvm::GlobalVariable *PrevSig);
+                       llvm::Value *RuntimeSig,
+                       llvm::Value *PrevSig);
 
 
     /// Saves runtime_sig snapshot into PrevSig before the BB terminator.
     void saveSignature(llvm::BasicBlock &BB,
-                      llvm::GlobalVariable *RuntimeSig,
-                      llvm::GlobalVariable *PrevSig);
+                      llvm::Value *RuntimeSig,
+                      llvm::Value *PrevSig);
 
 public:
     llvm::PreservedAnalyses run(llvm::Module &Md,
