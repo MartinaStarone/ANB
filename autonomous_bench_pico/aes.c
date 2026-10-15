@@ -614,9 +614,22 @@ int main(void) {
   AES_init_ctx(&ctx, key);
   uint64_t start_time = time_us_64();
 
+  // 'volatile' costringe il compilatore a NON ottimizzare e saltare il ciclo
+  for (volatile int i = 0; i < 1000; i++) {
+      uint8_t temp_in[16];
+      // Ricopia l'input originale ogni volta
+      memcpy(temp_in, in, 16);
+      
+      // Costringe il compilatore a non assumere che temp_in sia costante
+      __asm__ volatile("" : : "g"(temp_in) : "memory");
 
-  AES_ECB_encrypt(&ctx, in);
-
+      AES_ECB_encrypt(&ctx, temp_in);
+      
+      // Copia il risultato solo all'ultimo giro per far passare il controllo
+      if (i == 999) {
+          memcpy(in, temp_in, 16);
+      }
+  }
 
   uint64_t end_time = time_us_64();
 

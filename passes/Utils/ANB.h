@@ -6,6 +6,7 @@
 #include "llvm/IR/Value.h"
 #include <cstdint>
 #include <map>
+#include <tgmath.h>
 #include <unordered_map>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ScalarEvolution.h>
@@ -13,7 +14,7 @@
 namespace llvm {
 
 /// Default ANB modulus (prime number).
-static constexpr uint64_t ANB_DEFAULT_A = 58321ULL;
+static constexpr uint64_t ANB_DEFAULT_A = 65531ULL;//58321ULL;
 
 /// Compute the modular inverse of a modulo 2^64 at compile time.
 /// Uses Hensel's lemma: each iteration x *= (2 - a*x) doubles the

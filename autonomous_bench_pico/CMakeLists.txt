@@ -5,6 +5,7 @@ set(PICO_BOARD "pico2" CACHE STRING "")
 set(PICO_PLATFORM "rp2350-riscv" CACHE STRING "")
 set(PICO_TOOLCHAIN_PATH "/home/martina/pico-tools/riscv-toolchain/bin/" CACHE PATH "")
 set(PICO_GCC_TRIPLE "riscv32-unknown-elf" CACHE STRING "")
+set(PICOTOOL_FORCE_FETCH_FROM_GIT 1 CACHE BOOL "" FORCE)
 
 include("${PICO_SDK_PATH}/pico_sdk_init.cmake")
 project(pico2_hardened_project C CXX ASM)
@@ -20,20 +21,21 @@ set(RP2350_RISCV_ABI "ilp32" CACHE STRING "")
 set(APP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/aes.c")
 
 
-set(HARDENED_LL "hardened.ll")
+set(HARDENED_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/hardened_build")
+set(HARDENED_LL "${HARDENED_BUILD_DIR}/hardened.ll")
 set(HARDENED_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/hardened.o")
 
 # Esegue ASPIS con --anb-only al posto di --eddi/--cfcss
 add_custom_command(
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${HARDENED_LL}"
+    OUTPUT "${HARDENED_LL}"
     COMMAND
         "${ASPIS_DIR}/aspis.sh"
         --llvm-bin "${LLVM_BIN}"
         --anb-only
         --no-dup
-        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+        --build-dir "${HARDENED_BUILD_DIR}"
         ${APP_SOURCES}
-        -o "${HARDENED_LL}"
+        -o "hardened.ll"
         -g
         -S
         -emit-llvm
@@ -59,6 +61,7 @@ add_custom_command(
     OUTPUT "${HARDENED_OBJECT}"
     COMMAND
         "${LLVM_BIN}/clang"
+        -O2
         --target=riscv32-unknown-elf
         "-march=${RP2350_RISCV_ARCH}"
         "-mabi=${RP2350_RISCV_ABI}"
@@ -67,9 +70,9 @@ add_custom_command(
         -fno-builtin
         -fdata-sections
         -ffunction-sections
-        -c "${CMAKE_CURRENT_BINARY_DIR}/${HARDENED_LL}"
+        -c "${HARDENED_LL}"
         -o "${HARDENED_OBJECT}"
-    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${HARDENED_LL}"
+    DEPENDS "${HARDENED_LL}"
     COMMENT "Compiling hardened LLVM IR to a RISC-V object"
     VERBATIM
 )
@@ -88,3 +91,76 @@ target_link_libraries("${TARGET_NAME}" PRIVATE pico_stdlib m)
 pico_enable_stdio_uart("${TARGET_NAME}" 1)
 pico_enable_stdio_usb("${TARGET_NAME}" 1)
 pico_add_extra_outputs("${TARGET_NAME}")
+
+# ==============================================================
+# TARGET BASELINE: AES senza protezione ANB (parte da aes.ll)
+# Stessi flag identici del target hardened per confronto pulito
+# ==============================================================
+set(BASELINE_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/baseline_build")
+set(BASELINE_LL "${BASELINE_BUILD_DIR}/baseline.ll")
+set(BASELINE_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/aes_baseline.o")
+
+# Genera baseline.ll con aspis.sh (senza ANB: --no-cfc e --no-dup)
+add_custom_command(
+    OUTPUT "${BASELINE_LL}"
+    COMMAND
+        "${ASPIS_DIR}/aspis.sh"
+        --llvm-bin "${LLVM_BIN}"
+        --no-cfc
+        --no-dup
+        --build-dir "${BASELINE_BUILD_DIR}"
+        ${APP_SOURCES}
+        -o "baseline.ll"
+        -g
+        -S
+        -emit-llvm
+        --target=riscv32-unknown-elf
+        "-march=${RP2350_RISCV_ARCH}"
+        "-mabi=${RP2350_RISCV_ABI}"
+        --sysroot="${RISCV_SYSROOT}"
+        -ffreestanding
+        -fno-builtin
+        "-I${RISCV_SYSROOT}/include"
+        "$<$<BOOL:$<TARGET_PROPERTY:pico2_baseline,INCLUDE_DIRECTORIES>>:-I$<JOIN:$<TARGET_PROPERTY:pico2_baseline,INCLUDE_DIRECTORIES>,;-I>>"
+        "$<$<BOOL:$<TARGET_PROPERTY:pico2_baseline,COMPILE_DEFINITIONS>>:-D$<JOIN:$<TARGET_PROPERTY:pico2_baseline,COMPILE_DEFINITIONS>,;-D>>"
+        --no-cleanup
+    DEPENDS ${APP_SOURCES}
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Running ASPIS pipeline for baseline (no CFC, no DUP)"
+    COMMAND_EXPAND_LISTS
+    VERBATIM
+)
+
+# Compila baseline.ll in oggetto RISC-V (stessi flag di hardened)
+add_custom_command(
+    OUTPUT "${BASELINE_OBJECT}"
+    COMMAND
+        "${LLVM_BIN}/clang"
+        -O2
+        --target=riscv32-unknown-elf
+        "-march=${RP2350_RISCV_ARCH}"
+        "-mabi=${RP2350_RISCV_ABI}"
+        --sysroot="${RISCV_SYSROOT}"
+        -ffreestanding
+        -fno-builtin
+        -fdata-sections
+        -ffunction-sections
+        -c "${BASELINE_LL}"
+        -o "${BASELINE_OBJECT}"
+    DEPENDS "${BASELINE_LL}"
+    COMMENT "Compiling baseline LLVM IR to RISC-V object"
+    VERBATIM
+)
+
+add_custom_target(baseline_application_object DEPENDS "${BASELINE_OBJECT}")
+set_source_files_properties("${BASELINE_OBJECT}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+
+add_executable(pico2_baseline "${BASELINE_OBJECT}")
+add_dependencies(pico2_baseline baseline_application_object)
+
+set_target_properties(pico2_baseline PROPERTIES LINKER_LANGUAGE C)
+target_link_libraries(pico2_baseline PRIVATE pico_stdlib m)
+
+pico_enable_stdio_uart(pico2_baseline 1)
+pico_enable_stdio_usb(pico2_baseline 1)
+pico_add_extra_outputs(pico2_baseline)

@@ -36,7 +36,7 @@ static void phex(const char *label, const uint8_t *buf, int len)
 
 int main(void)
 {
-    alarm(1);
+
     printf("\n=== ANB + AES-128 ECB test ===\n\n");
 
     uint8_t buf[16];

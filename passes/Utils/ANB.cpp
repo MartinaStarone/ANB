@@ -8,6 +8,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
@@ -319,6 +320,7 @@ bool ANBPass::hasANBInstructions(BasicBlock &BB,
             if (SI->getValueOperand()->getType()->isIntegerTy() || (SI->getValueOperand()->getType()->isPointerTy() && (!RuntimeSig || SI->getPointerOperand()->stripPointerCasts() != RuntimeSig->stripPointerCasts())))
                 hasProtectable = true;
         }
+
     }
     return hasProtectable;
 }
@@ -489,8 +491,8 @@ void ANBPass::checkLoopCount(Loop *L, ScalarEvolution &SE, uint64_t expectedRoun
 
     // Poison the runtime signature: sig += err
     Value *sig    = ExitB.CreateLoad(I64, RuntimeSig, "anb.sig_load");
-    Value *newSig = ExitB.CreateAdd(sig, errWithFault, "anb.sig_upd_loop");
-    ExitB.CreateStore(newSig, RuntimeSig);
+    Value *newSig= ExitB.CreateAdd(sig, errWithFault, "anb.sig_upd_loop");
+     ExitB.CreateStore(newSig, RuntimeSig);
 }
 /*
  * Saves the current runtime_sig into anb_prev_sig before the BB terminator.
@@ -531,15 +533,14 @@ Value *ANBPass::checkSig(llvm::Module &Md, ANBValue av, IRBuilder<> &B) {
 PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
     getFuncAnnotations(Md, FuncAnnotations);
     Type *I64 = Type::getInt64Ty(Md.getContext());
-    
+
     GlobalVariable *RuntimeSig = Md.getGlobalVariable("runtime_sig");
     if (!RuntimeSig) {
         RuntimeSig = new GlobalVariable(
             Md, I64,
             /*isConstant=*/false,
             GlobalValue::ExternalLinkage,
-            ConstantInt::get(I64, 0),
-            "runtime_sig");
+            ConstantInt::get(I64, 0),"runtime_sig");
     }
 
     // Create (or retrieve) anb_prev_sig global
@@ -557,8 +558,13 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
     // Biases are drawn from [1, A-1] so they are always non-zero.
     std::uniform_int_distribution<uint64_t> biasDist(1, ANB_DEFAULT_A - 1);
     FunctionAnalysisManager &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(Md).getManager();
+    std::unordered_map<Function *, uint64_t> returnTokens;
+    uint64_t nextReturnToken = 1;
     for (Function &Fn : Md) {
         if (!shouldCompile(Fn, FuncAnnotations)) continue;
+        /*if (!Fn.isDeclaration() && shouldCompile(Fn, FuncAnnotations)) {
+            returnTokens[&Fn] = nextReturnToken++;
+        }*/
         uint64_t expectedRounds = 0;
         // Initialize compile-time signatures for this function
         compileTimeSig.clear();
@@ -568,10 +574,20 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
         Value *localRuntimeSig = EntryB.CreateAlloca(I64, nullptr, "anb.localRuntimeSig");
         Value *allocaPrevSig = EntryB.CreateAlloca(I64, nullptr, "anb.allocaPrevSig");
 
-        uint32_t initSig = compileTimeSig[&Fn.getEntryBlock()];
-        Value *sigVal = ConstantInt::get(I64, initSig);
-        EntryB.CreateStore(sigVal, localRuntimeSig);
-        EntryB.CreateStore(sigVal, allocaPrevSig);
+        if (Fn.getName() == "main") {
+            uint32_t initSig = compileTimeSig[&Fn.getEntryBlock()];
+            Value *sigVal = ConstantInt::get(I64, initSig);
+            EntryB.CreateStore(sigVal, localRuntimeSig);
+            EntryB.CreateStore(sigVal, allocaPrevSig);
+        } else {
+            Value *sigVal = EntryB.CreateLoad(I64, RuntimeSig, true, "anb.incoming_sig");
+            Value *initialSig = EntryB.CreateAdd(sigVal, ConstantInt::get(I64, 1),
+                     "anb.entry_sig");
+            EntryB.CreateStore(initialSig, localRuntimeSig);
+            EntryB.CreateStore(initialSig, allocaPrevSig);
+        }
+
+
 
         //Find trip_count annotation by scanning all global annotations for this function
         if (GlobalVariable *GA = Md.getGlobalVariable("llvm.global.annotations")) {
@@ -636,7 +652,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
 
         // ── Pass 2: insert inter-BB checks and ANB instrumentation ────────
         for (BasicBlock &BB : Fn) {
-//----------------------No more racfed---------------------------------//
+            //----------------------No more racfed---------------------------------//
             // Skip basic blocks injected by RACFED.
             StringRef bbName = BB.getName();
             if (bbName.contains_insensitive("racfed") ||
@@ -644,7 +660,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 bbName.contains_insensitive("errbb")  ||
                 bbName.contains_insensitive("verification"))
                 continue;
-//-----------------------------------------------------------------------//
+            //-----------------------------------------------------------------------//
 
             bool bbHasANB = std::find(anbBBs.begin(), anbBBs.end(), &BB)
                             != anbBBs.end();
@@ -654,20 +670,18 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 IRBuilder<> BEntry(&*BB.getFirstInsertionPt());
                 uint32_t initSig = compileTimeSig[&BB];
                 Value *sigVal = ConstantInt::get(I64, initSig);
-                
+
                 // Initialize the runtime signature with the compile-time value
                 BEntry.CreateStore(sigVal, RuntimeSig);
-                
+
                 // Also save it as the initial snapshot for the next BB
                 BEntry.CreateStore(sigVal, PrevSig);
-                
+
                 printSig(Md, BEntry, sigVal, "Entry BB Init Signature");
             }*/
 
             if (!bbHasANB) {
-                // Se il blocco non è protetto (es. contiene CallInst), 
-                // non lo strumentiamo, ma DOBBIAMO salvare lo snapshot alla fine 
-                // per dare un punto di partenza valido al blocco successivo!
+
                 saveSnapshot(BB, localRuntimeSig, allocaPrevSig);
                 continue;
             }
@@ -679,14 +693,16 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 if (I.isTerminator())           continue;
                 if (isa<DbgInfoIntrinsic>(&I))  continue;
                 if (I.getName().starts_with("anb.")) continue;
-                // Skip store/load that touch our own ANB alloca variables
+                // Skip store/load that touch our own ANB alloca variables or globals
                 if (auto *SI = dyn_cast<StoreInst>(&I)) {
                     Value *ptr = SI->getPointerOperand()->stripPointerCasts();
-                    if (ptr == localRuntimeSig || ptr == allocaPrevSig) continue;
+                    if (ptr == localRuntimeSig || ptr == allocaPrevSig  ||
+                        ptr == RuntimeSig || ptr == PrevSig) continue;
                 }
                 if (auto *LI = dyn_cast<LoadInst>(&I)) {
                     Value *ptr = LI->getPointerOperand()->stripPointerCasts();
-                    if (ptr == localRuntimeSig || ptr == allocaPrevSig) continue;
+                    if (ptr == localRuntimeSig || ptr == allocaPrevSig ||
+                        ptr == RuntimeSig || ptr == PrevSig) continue;
                 }
                 origInstrs.push_back(&I);
             }
@@ -702,6 +718,8 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                         LI->getPointerOperand()->stripPointerCasts() != PrevSig
                         && LI->getType()->isIntegerTy() && LI->getPointerOperand()->stripPointerCasts()!=localRuntimeSig
                         && LI->getPointerOperand()->stripPointerCasts() != allocaPrevSig &&
+                        !(LI->getPointerOperand()->getName().contains("anb.loop_cnt"))&&
+                        !(LI->getPointerOperand()->getName().contains("anb.sig_upd"))&&
                         (LI->getType()->isIntegerTy()
                         || LI->getType()->isPointerTy())){
                         Instruction *insertPt = I->getNextNode();
@@ -714,17 +732,20 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                             clonedLoad->insertInto(I->getParent(), insertPt->getIterator());
                             Value *cmp = B.CreateICmpEQ(LI, clonedLoad, "anb.load_clone");
                             Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_load_clone");
-                            Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb_load_clone_sig");
+                            Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb.read_sig");
                             printSig(Md, B, sig, "Before Load Instr - runtime_sig");
-                            Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
+                            Value* newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
                             B.CreateStore(newSig, localRuntimeSig);
-                            printSig(Md, B, newSig, "After Load Instr - runtime_sig");
+
+                            printSig(Md, B,newSig, "After Load Instr - runtime_sig");
                         }
-                    }
+                        }
                 }
                 //protezione store
                 if (auto *SI = dyn_cast<StoreInst>(I)) {
+
                     Value *valStored = SI->getValueOperand();
+
                     if (SI->getPointerOperand()->stripPointerCasts() != RuntimeSig && SI->getPointerOperand()->stripPointerCasts() != PrevSig && valStored->getType()->isIntegerTy()) {
                         Instruction *insertPt = I->getNextNode();
                         if (insertPt) {
@@ -737,39 +758,53 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                             readStore->setVolatile(true);
                             Value *cmp = B.CreateICmpEQ(valStored, readStore, "anb.store_clone_cmp");
                             Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_store_clone_inc");
-                            Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb.sig_store");
+                            Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb.read_sig");
                             printSig(Md, B, sig, "Before Store Instr - runtime_sig");
                             Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
                             B.CreateStore(newSig, localRuntimeSig);
-                            printSig(Md, B, newSig, "After Store Instr - runtime_sig");
+                            printSig(Md, B, localRuntimeSig, "After Store Instr - runtime_sig");
                         }
                     }
                 }
-                
-                //------------Protezione Operazioni Booleane (XOR, AND, OR) via SEDDI-in-ANB---------------------//
+
+                //------------Protezione Operazioni Booleane (XOR, AND, OR) via volatile reload---//
                 if (BO && (BO->getOpcode() == Instruction::Xor ||
                            BO->getOpcode() == Instruction::And ||
                            BO->getOpcode() == Instruction::Or) &&
                     BO->getType()->isIntegerTy()) {
-                    Instruction *insertPt = I->getNextNode();
-                    if (!insertPt) continue;
-                    expectedDiff++;
-                    IRBuilder<> B(insertPt);
+                    /* Instruction *insertPt = I->getNextNode();
+                     if (!insertPt) continue;
+                     expectedDiff++;
+                     IRBuilder<> B(insertPt);
 
-                    // Cloniamo l'istruzione booleana
-                    Instruction *clonedOp = BO->clone();
-                    clonedOp->insertInto(I->getParent(), insertPt->getIterator());
-                    
-                    // Confrontiamo originale e clone
-                    Value *cmp = B.CreateICmpEQ(BO, clonedOp, "anb.bitwise_clone_cmp");
-                    Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_bitwise_inc");
-                    Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb.sig_bitwise");
-                    printSig(Md, B, sig, "Before Bitwise Instr - runtime_sig");
-                    Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
-                    B.CreateStore(newSig, localRuntimeSig);
-                    printSig(Md, B, newSig, "After Bitwise Instr - runtime_sig");
+                     Value *op0 = BO->getOperand(0);
+                     Value *op1 = BO->getOperand(1);
+
+                     AllocaInst *tmp = B.CreateAlloca(op0->getType());
+                     B.CreateStore(op0, tmp)->setVolatile(true);
+                     Value *opaque_op0 = B.CreateLoad(op0->getType(), tmp);
+                     cast<LoadInst>(opaque_op0)->setVolatile(true);
+
+
+                     Value *result = B.CreateXor(opaque_op0, op1, "anb.xor_clone");
+
+                     // Tronca entrambi a i32 per uniformare tipi < 32 bit
+                     Type *I32 = B.getInt32Ty();
+                     Value *orig32  = B.CreateZExtOrTrunc(BO,     I32, "anb.orig32");
+                     Value *clone32 = B.CreateZExtOrTrunc(result, I32, "anb.clone32");
+
+                     // Confronta originale con ricalcolato
+                     Value *cmp = B.CreateICmpEQ(orig32, clone32, "anb.bitwise_clone_cmp");
+
+                     Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_bitwise_inc");
+                     Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb.sig_bitwise");
+                     printSig(Md, B, sig, "Before Bitwise Instr - runtime_sig");
+                     Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
+                     B.CreateStore(newSig, localRuntimeSig);
+                     printSig(Md, B, localRuntimeSig, "After Bitwise Instr - runtime_sig");*/
+
                     continue;
-                }
+                    }
 
                 if (BO && BO->getOpcode() == Instruction::Add &&
                     BO->getType()->isIntegerTy()) {  // i32 e i64
@@ -797,13 +832,13 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     // runtime_sig += increment_i64 (1 se ok, 0 se manomesso)
                     Value *sig    = B.CreateLoad(I64, localRuntimeSig, "anb.sig_load");
                     printSig(Md, B, sig, "Before Add Instr - runtime_sig");
-                    
+
                     Value *newSig = B.CreateAdd(sig, check, "anb.sig_upd");
                     B.CreateStore(newSig, localRuntimeSig);
-                    printSig(Md, B, newSig, "After Add Instr - runtime_sig");
+                    printSig(Md, B, localRuntimeSig, "After Add Instr - runtime_sig");
                     continue;
-                }
-                
+                    }
+
                 //------------subtraction---------------------//
                 if (BO && BO->getOpcode() == Instruction::Sub &&
                     BO->getType()->isIntegerTy()) {
@@ -813,7 +848,7 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     IRBuilder<> B(insertPt);
                     uint64_t Ba = biasDist(rng);
                     uint64_t Bb = biasDist(rng);
-                    
+
                     // ANTI-UNDERFLOW FIX:
                     // If a == b (e.g. i == Nk in first iteration), z_enc = Ba - Bb.
                     // If Ba < Bb, z_enc becomes negative, wrapping around in 64-bit unsigned.
@@ -837,47 +872,47 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
 
                     Value *sig    = B.CreateLoad(I64, localRuntimeSig, "anb.sig_load");
                     printSig(Md, B, sig, "Before Sub Instr - runtime_sig");
-                    
-                    Value *newSig = B.CreateAdd(sig, check, "anb.sig_upd");
+
+                    Value *newSig= B.CreateAdd(sig, check, "anb.sig_upd");
                     B.CreateStore(newSig, localRuntimeSig);
-                    printSig(Md, B, newSig, "After Sub Instr - runtime_sig");
+                    printSig(Md, B, localRuntimeSig, "After Sub Instr - runtime_sig");
                     continue;
-                }
+                    }
                 //------compare------------//
-               /* auto *CI = dyn_cast<ICmpInst>(I);
-                if (CI && CI->getPredicate() == ICmpInst::ICMP_EQ &&
-                    CI->getOperand(0)->getType()->isIntegerTy())  // i32 e i64
-                {
-                    Instruction *insertPt = I->getNextNode();
-                    if (!insertPt) continue;
-                    IRBuilder<> B(insertPt);
+                /* auto *CI = dyn_cast<ICmpInst>(I);
+                 if (CI && CI->getPredicate() == ICmpInst::ICMP_EQ &&
+                     CI->getOperand(0)->getType()->isIntegerTy())  // i32 e i64
+                 {
+                     Instruction *insertPt = I->getNextNode();
+                     if (!insertPt) continue;
+                     IRBuilder<> B(insertPt);
 
-                    uint64_t Ba = biasDist(rng);
-                    uint64_t Bb = biasDist(rng);
+                     uint64_t Ba = biasDist(rng);
+                     uint64_t Bb = biasDist(rng);
 
-                    // sigPos = (Ba - Bb) % A   [compile-time expected value]
-                    uint64_t sigPos = (ANB_DEFAULT_A + (Ba % ANB_DEFAULT_A)
-                                      - (Bb % ANB_DEFAULT_A)) % ANB_DEFAULT_A;
+                     // sigPos = (Ba - Bb) % A   [compile-time expected value]
+                     uint64_t sigPos = (ANB_DEFAULT_A + (Ba % ANB_DEFAULT_A)
+                                       - (Bb % ANB_DEFAULT_A)) % ANB_DEFAULT_A;
 
-                    // sigCond = ((a+Ba) - (b+Bb)) % A
-                    // When a==b: sigCond == sigPos -> error == 0
-                    // When a!=b: sigCond != sigPos -> error != 0
-                    Value *sigCond = createANBSetEq(B,
-                                                    CI->getOperand(0), Ba,
-                                                    CI->getOperand(1), Bb,
-                                                    ANB_DEFAULT_A);
+                     // sigCond = ((a+Ba) - (b+Bb)) % A
+                     // When a==b: sigCond == sigPos -> error == 0
+                     // When a!=b: sigCond != sigPos -> error != 0
+                     Value *sigCond = createANBSetEq(B,
+                                                     CI->getOperand(0), Ba,
+                                                     CI->getOperand(1), Bb,
+                                                     ANB_DEFAULT_A);
 
-                    Value *sigPosV = ConstantInt::get(I64, sigPos);
-                    Value *err64   = B.CreateSub(sigCond, sigPosV, "anb.eq_err");
+                     Value *sigPosV = ConstantInt::get(I64, sigPos);
+                     Value *err64   = B.CreateSub(sigCond, sigPosV, "anb.eq_err");
 
-                    // runtime_sig += error
-                    Value *sig    = B.CreateLoad(I64, RuntimeSig, "anb.sig_load");
-                    printSig(Md, B, sig, "Before Cmp Instr - runtime_sig");
-                    Value *newSig = B.CreateAdd(sig, err64, "anb.sig_upd");
-                    B.CreateStore(newSig, RuntimeSig);
-                    printSig(Md, B, newSig, "After Cmp Instr - runtime_sig");
-                    continue;
-                }*/
+                     // runtime_sig += error
+                     Value *sig    = B.CreateLoad(I64, RuntimeSig, "anb.sig_load");
+                     printSig(Md, B, sig, "Before Cmp Instr - runtime_sig");
+                     Value *newSig = B.CreateAdd(sig, err64, "anb.sig_upd");
+                     B.CreateStore(newSig, RuntimeSig);
+                     printSig(Md, B, newSig, "After Cmp Instr - runtime_sig");
+                     continue;
+                 }*/
                 //------------multiplication---------------------//
                 if (BO && BO->getOpcode() == Instruction::Mul &&
                         BO->getType()->isIntegerTy()) {  // i32 e i64
@@ -903,28 +938,61 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     Value *sig    = B.CreateLoad(I64, localRuntimeSig, "anb.sig_load");
                     printSig(Md, B, sig, "Before Mul Instr - runtime_sig");
 
-                    Value *newSig = B.CreateAdd(sig, increment_i64, "anb.sig_upd");
+                    Value* newSig = B.CreateAdd(sig, increment_i64, "anb.sig_upd");
                     B.CreateStore(newSig, localRuntimeSig);
-                    printSig(Md, B, newSig, "After Mul Instr - runtime_sig");
+                    printSig(Md, B, localRuntimeSig, "After Mul Instr - runtime_sig");
                     continue;
-                }
+                        }
 
-                // Protezione (Backup/Restore) attorno alle chiamate a funzione
+                // Protezione call: challenge/response via @runtime_sig
                 if (auto *CI = dyn_cast<CallInst>(I)) {
                     if (!isa<IntrinsicInst>(CI) && !CI->isInlineAsm()) {
+                        Function *calledFn = CI->getCalledFunction();
+                        if (!calledFn || calledFn->isDeclaration() || !shouldCompile(*calledFn, FuncAnnotations))
+                            continue;
+
                         Instruction *insertPt = CI->getNextNode();
                         if (insertPt) {
+                            expectedDiff++;
                             IRBuilder<> BBefore(CI);
                             Type *I64 = BBefore.getInt64Ty();
-                            Value *sigBackup = BBefore.CreateLoad(I64, localRuntimeSig, "anb.sig_backup");
-                            Value *prevBackup = BBefore.CreateLoad(I64, allocaPrevSig, "anb.prev_backup");
-                            
-                            IRBuilder<> BAfter(insertPt);
-                            BAfter.CreateStore(sigBackup, localRuntimeSig);
-                            BAfter.CreateStore(prevBackup, allocaPrevSig);
+
+                            if (auto *CI = dyn_cast<CallInst>(I)) {
+                                if (!isa<IntrinsicInst>(CI) && !CI->isInlineAsm()) {
+                                    Instruction *insertPt = CI->getNextNode();
+                                    if (insertPt) {
+                                        IRBuilder<> BBefore(CI);
+                                        Type *I64 = BBefore.getInt64Ty();
+
+                                        Value *sigBackup = BBefore.CreateLoad(I64, localRuntimeSig, "anb.sig_backup");
+                                        Value *prevBackup = BBefore.CreateLoad(I64, allocaPrevSig, "anb.prev_backup");
+
+                                        BBefore.CreateStore(sigBackup, RuntimeSig, true);
+                                        BBefore.CreateStore(prevBackup, PrevSig, true);
+
+                                        IRBuilder<> BAfter(insertPt);
+                                        Value *returnedSig = BAfter.CreateLoad(I64, RuntimeSig, true, "anb.returned_sig");
+                                        Value *newsig = BAfter.CreateICmpNE(sigBackup, returnedSig, "anb_call_compare");
+
+                                        Value *increment = BAfter.CreateZExt(newsig, I64, "anb.call_increment");
+
+                                        Value *newSig = BAfter.CreateAdd(sigBackup, increment, "anb.call_new_sig");
+
+                                        BAfter.CreateStore(newSig, localRuntimeSig);
+
+
+
+                                    }
+                                }
+                            }
+
+
                         }
+
+
                     }
-                }
+
+                } // if CallInst
 
             } // for each original instruction
 
@@ -933,14 +1001,27 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                 checkJumpSig(BB, localRuntimeSig, allocaPrevSig , expectedDiff);
             }
 
-            // ── Check della Return ─────────────────────────────────────────
-            // We replaced checkOnReturn with the strict BB verification above.
 
             // ── Snapshot: save runtime_sig before leaving this BB ──────────
             if (bbHasANB) {
                 saveSnapshot(BB, localRuntimeSig, allocaPrevSig);
             }
+
+
         }     // for each BB
+
+        for (BasicBlock &ReturnBB : Fn) {
+            if (auto *RI = dyn_cast<ReturnInst>(ReturnBB.getTerminator())) {
+                IRBuilder<> RetB(RI);
+
+                Value *finalSig =
+                    RetB.CreateLoad(I64, localRuntimeSig, "anb.final_sig");
+
+                RetB.CreateStore(finalSig, RuntimeSig, true);
+            }
+        }
+
+
     }         // for each function
 
     return PreservedAnalyses::none();

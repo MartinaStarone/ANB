@@ -343,7 +343,8 @@ run_aspis() {
         # Extract the filename without extension
         filename=$(basename "$input_file" | sed 's/\.[^.]*$//')
         # Compile the file to LLVM IR (.ll) and save it in the build directory
-        exe $CLANG "$input_file" $clang_options -S -emit-llvm -O0 -Xclang -disable-O0-optnone -o "$build_dir/$filename.ll"
+        exe $CLANG "$input_file" $clang_options -S -emit-llvm -O2 -o "$build_dir/$filename.ll"
+        #exe $CLANG "$input_file" $clang_options -S -emit-llvm -O0 -Xclang -disable-O0-optnone -o "$build_dir/$filename.ll"
     done
 
     ## LINK & PREPROCESS
@@ -355,7 +356,8 @@ run_aspis() {
         exe $OPT --passes="strip" $build_dir/out.ll -o $build_dir/out.ll
         echo "  Debug mode disabled, stripped debug symbols."
     fi
-    
+
+    exe $OPT --passes="mem2reg" $build_dir/out.ll -o $build_dir/out.ll
     exe $OPT --passes="lower-switch" $build_dir/out.ll -o $build_dir/out.ll
 
     ## FuncRetToRef
@@ -407,7 +409,7 @@ run_aspis() {
         4)
             exe $OPT -load-pass-plugin=$DIR/build/passes/Utils/libUtils.so \
                      -load-pass-plugin=$DIR/build/passes/libANB.so \
-                     --passes="anb-encode" $build_dir/out.ll -o $build_dir/out.ll -S
+                     --passes="anb-encode,mem2reg" $build_dir/out.ll -o $build_dir/out.ll -S
             ;;
         *)
             echo -e "\t--no-cfc specified!"
@@ -451,13 +453,14 @@ run_aspis() {
     fi;
 
     ## Backend
+    opt_flags="-O2"
     exe $OPT $build_dir/out.ll -o $build_dir/out.ll -S $opt_flags
     if [[ "$enable_profiling" == "true" ]]; then
         title_msg "ASPIS Profiling"
         exe $OPT -load-pass-plugin=$DIR/build/passes/libPROFILER.so --passes="aspis-insert-check-profile" $build_dir/out.ll -o $build_dir/out.ll -S
         success_msg "Code instrumented."
 
-        exe $CLANG $clang_options $build_dir/out.ll $asm_files -o $build_dir/$output_file 
+        exe $CLANG $clang_options $build_dir/out.ll $asm_files -o $build_dir/$output_file
         success_msg "Instrumented binary emitted."
 
         exe $build_dir/$output_file
@@ -468,7 +471,7 @@ run_aspis() {
         exit
     fi;
 
-    exe $CLANG $clang_options $build_dir/out.ll $asm_files -o $build_dir/$output_file 
+    exe $CLANG  $clang_options $build_dir/out.ll $asm_files -o $build_dir/$output_file
     success_msg "Binary emitted."
 
     #Cleanup
