@@ -767,44 +767,77 @@ PreservedAnalyses ANBPass::run(llvm::Module &Md, ModuleAnalysisManager &AM) {
                     }
                 }
 
-                //------------Protezione Operazioni Booleane (XOR, AND, OR) via volatile reload---//
+                // Verify the original logical result against an opaque asm computation.
                 if (BO && (BO->getOpcode() == Instruction::Xor ||
                            BO->getOpcode() == Instruction::And ||
                            BO->getOpcode() == Instruction::Or) &&
                     BO->getType()->isIntegerTy()) {
-                    /* Instruction *insertPt = I->getNextNode();
-                     if (!insertPt) continue;
-                     expectedDiff++;
-                     IRBuilder<> B(insertPt);
+                    Instruction *insertPt = BO->getNextNode();
+                    if (!insertPt) continue;
 
-                     Value *op0 = BO->getOperand(0);
-                     Value *op1 = BO->getOperand(1);
-
-                     AllocaInst *tmp = B.CreateAlloca(op0->getType());
-                     B.CreateStore(op0, tmp)->setVolatile(true);
-                     Value *opaque_op0 = B.CreateLoad(op0->getType(), tmp);
-                     cast<LoadInst>(opaque_op0)->setVolatile(true);
-
-
-                     Value *result = B.CreateXor(opaque_op0, op1, "anb.xor_clone");
-
-                     // Tronca entrambi a i32 per uniformare tipi < 32 bit
-                     Type *I32 = B.getInt32Ty();
-                     Value *orig32  = B.CreateZExtOrTrunc(BO,     I32, "anb.orig32");
-                     Value *clone32 = B.CreateZExtOrTrunc(result, I32, "anb.clone32");
-
-                     // Confronta originale con ricalcolato
-                     Value *cmp = B.CreateICmpEQ(orig32, clone32, "anb.bitwise_clone_cmp");
-
-                     Value *increment = B.CreateZExt(cmp, B.getInt64Ty(), "anb_bitwise_inc");
-                     Value *sig = B.CreateLoad(B.getInt64Ty(), localRuntimeSig, "anb.sig_bitwise");
-                     printSig(Md, B, sig, "Before Bitwise Instr - runtime_sig");
-                     Value *newSig = B.CreateAdd(sig, increment, "anb.sig_upd");
-                     B.CreateStore(newSig, localRuntimeSig);
-                     printSig(Md, B, localRuntimeSig, "After Bitwise Instr - runtime_sig");*/
-
-                    continue;
+                    Triple Target(Md.getTargetTriple());
+                    bool IsX86 = false;
+                    unsigned RegWidth = 0;
+                    switch (Target.getArch()) {
+                        case Triple::x86:
+                            IsX86 = true;
+                            RegWidth = 32;
+                            break;
+                        case Triple::x86_64:
+                            IsX86 = true;
+                            RegWidth = 64;
+                            break;
+                        case Triple::riscv32: RegWidth = 32; break;
+                        case Triple::riscv64: RegWidth = 64; break;
+                        default:
+                            // No instrumentation or expected increment on unsupported targets.
+                            continue;
                     }
+
+                    Type *BoType = BO->getType();
+                    unsigned Width = BoType->getIntegerBitWidth();
+                    if (IsX86 && Width <= 32) RegWidth = 32;
+                    Type *RegTy = IntegerType::get(Fn.getContext(), RegWidth);
+                    std::string Opcode = BO->getOpcode() == Instruction::Xor ? "xor" :
+                                         BO->getOpcode() == Instruction::And ? "and" : "or";
+                    std::string AsmString = IsX86
+                        ? Opcode + (RegWidth == 64 ? "q" : "l") + " $2, $0"
+                        : Opcode + " $0, $1, $2";
+                    std::string Constraints = IsX86 ? "=r,0,r,~{flags}" : "=r,r,r";
+                    FunctionType *AsmTy = FunctionType::get(RegTy, {RegTy, RegTy}, false);
+                    InlineAsm *IA = InlineAsm::get(AsmTy, AsmString, Constraints, true);
+                    IRBuilder<> B(insertPt);
+                    B.SetCurrentDebugLocation(BO->getDebugLoc());
+                    Value *Result = nullptr;
+                    for (unsigned Offset = 0; Offset < Width; Offset += RegWidth) {
+                        unsigned ChunkWidth = std::min(RegWidth, Width - Offset);
+                        Type *ChunkTy = IntegerType::get(Fn.getContext(), ChunkWidth);
+                        auto ExtractChunk = [&](Value *V) -> Value * {
+                            if (Offset != 0)
+                                V = B.CreateLShr(V, Offset, "anb.logic.shift");
+                            V = B.CreateZExtOrTrunc(V, ChunkTy, "anb.logic.chunk");
+                            return B.CreateZExtOrTrunc(V, RegTy, "anb.logic.reg");
+                        };
+                        Value *LHS = ExtractChunk(BO->getOperand(0));
+                        Value *RHS = ExtractChunk(BO->getOperand(1));
+                        Value *Part = B.CreateCall(AsmTy, IA, {LHS, RHS}, "anb.logic.asm");
+                        Part = B.CreateZExtOrTrunc(Part, ChunkTy, "anb.logic.part");
+                        Part = B.CreateZExtOrTrunc(Part, BoType, "anb.logic.wide");
+                        if (Offset != 0)
+                            Part = B.CreateShl(Part, Offset, "anb.logic.position");
+                        Result = Result ? B.CreateOr(Result, Part, "anb.logic.join") : Part;
+                    }
+
+                    Value *Matches = B.CreateICmpEQ(BO, Result, "anb.logic.matches");
+                    Value *Increment = B.CreateZExt(Matches, I64, "anb.logic.increment");
+                    Value *Sig = B.CreateLoad(I64, localRuntimeSig, "anb.logic.sig");
+                    Value *NewSig = B.CreateAdd(Sig, Increment, "anb.logic.new_sig");
+                    B.CreateStore(NewSig, localRuntimeSig);
+                    expectedDiff++;
+                    continue;
+                }
+
+
 
                 if (BO && BO->getOpcode() == Instruction::Add &&
                     BO->getType()->isIntegerTy()) {  // i32 e i64
